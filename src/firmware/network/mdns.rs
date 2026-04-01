@@ -6,8 +6,8 @@
     reason = "mDNS task uses fixed packet buffers and macro-generated async wrappers"
 )]
 
-use embassy_net::{IpAddress, Stack};
 use embassy_net::udp::UdpSocket;
+use embassy_net::{IpAddress, Stack};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_println::println;
 
@@ -465,10 +465,7 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
                     }
                     _ => (IpAddress::Ipv4(super::MDNS_MULTICAST), super::MDNS_PORT),
                 };
-                if let Err(error) = socket
-                    .send_to(&send_buf[..n], multicast_destination)
-                    .await
-                {
+                if let Err(error) = socket.send_to(&send_buf[..n], multicast_destination).await {
                     println!("mdns: multicast send failed: {:?}", error);
                 }
                 if let Err(error) = socket.send_to(&send_buf[..n], meta).await {
