@@ -1,7 +1,7 @@
 # Brewster
 
 `brewster` is an ESP32-S3 Rust firmware project for a small temperature-controlled brewing setup.
-It reads a DS18B20 temperature sensor, drives a solid-state relay with a PID loop, exposes runtime status over Wi-Fi, and persists the target temperature in flash.
+It reads a DS18B20 temperature sensor, drives a solid-state relay with a PID loop, syncs time with NTP, exposes runtime status and Prometheus metrics over Wi-Fi, and persists the target temperature in flash.
 
 ## What The Firmware Does
 
@@ -12,6 +12,7 @@ It reads a DS18B20 temperature sensor, drives a solid-state relay with a PID loo
 - Connects to Wi-Fi in station mode.
 - Advertises `<hostname>.local` over mDNS.
 - Serves JSON status over HTTP on port 80.
+- Exposes Prometheus metrics over HTTP on `/metrics`.
 - Accepts target temperature updates over HTTP.
 - Syncs time from configured NTP servers or the DHCP gateway.
 - Stores the target temperature in the `cfg` flash partition.
@@ -287,6 +288,7 @@ The serial console prints a compact text version of the same operational state a
 ## License
 
 This project is licensed under the BSD 3-Clause License.
+See `LICENSE` for the full license text.
 
 Copyright (c) 2026 David Bannister
 
