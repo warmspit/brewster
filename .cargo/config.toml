@@ -1,0 +1,15 @@
+include = ["config.local.toml"]
+
+[target.xtensa-esp32s3-none-elf]
+linker = "/Users/david/.rustup/toolchains/esp/xtensa-esp-elf/esp-15.2.0_20250920/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc"
+runner = "espflash flash --monitor --chip esp32s3 --partition-table partitions.csv"
+
+[build]
+rustflags = [
+  "-C", "link-arg=-nostartfiles",
+]
+
+target = "xtensa-esp32s3-none-elf"
+
+[unstable]
+build-std = ["core", "alloc"]

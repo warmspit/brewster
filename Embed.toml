@@ -1,0 +1,33 @@
+[default.general]
+# The logging level while the program executes
+log_level = "Debug"
+
+# Control chip support. If disabled, probe-rs will detect the target
+# Auto-detect the chip
+# chip = <removed, auto-detect>
+
+connect_under_reset = true
+
+[default.probe]
+# Protocol to use: jtag or swd
+protocol = "Jtag"
+
+[default.flashing]
+# Whether or not the target should be flashed before debugging.
+enabled = true
+restore_unwritten_bytes = false
+
+[default.gdb]
+# Enable GDB
+enabled = true
+# GDB connection string 
+gdb_connection_string = "127.0.0.1:3333"
+
+[default.reset]
+# Whether to perform a hardware reset before program execution
+enabled = true
+halt_afterwards = false
+
+[default.rtt]
+# Whether Real Time Transfer (RTT) should be enabled
+enabled = false

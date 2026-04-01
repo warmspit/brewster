@@ -1,0 +1,286 @@
+#![allow(
+    clippy::large_stack_frames,
+    reason = "mDNS task uses fixed packet buffers and macro-generated async wrappers"
+)]
+
+use embassy_net::Stack;
+use embassy_net::udp::UdpSocket;
+use embassy_time::{Duration, Timer, with_timeout};
+use esp_println::println;
+
+use crate::firmware::status;
+
+fn eq_ascii_ignore_case(a: u8, b: u8) -> bool {
+    a.eq_ignore_ascii_case(&b)
+}
+
+#[derive(Clone, Copy)]
+struct MdnsQuestionMatch {
+    prefer_unicast_response: bool,
+    qtype: u16,
+    qclass_raw: u16,
+}
+
+fn bytes_eq_ascii_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if !eq_ascii_ignore_case(a[i], b[i]) {
+            return false;
+        }
+    }
+    true
+}
+
+fn dns_name_matches_host_local(
+    packet: &[u8],
+    start: usize,
+    hostname: &[u8],
+) -> Option<(bool, usize)> {
+    let mut cursor = start;
+    let mut jumped = false;
+    let mut next = start;
+    let mut depth = 0u8;
+    let mut label_index = 0u8;
+    let mut matched = true;
+
+    while depth < 16 {
+        if cursor >= packet.len() {
+            return None;
+        }
+
+        let len = packet[cursor];
+        if (len & 0xC0) == 0xC0 {
+            if cursor + 1 >= packet.len() {
+                return None;
+            }
+            let ptr = (((len & 0x3F) as usize) << 8) | packet[cursor + 1] as usize;
+            if ptr >= packet.len() {
+                return None;
+            }
+            if !jumped {
+                next = cursor + 2;
+                jumped = true;
+            }
+            cursor = ptr;
+            depth = depth.saturating_add(1);
+            continue;
+        }
+
+        if (len & 0xC0) != 0 {
+            return None;
+        }
+
+        cursor += 1;
+        if len == 0 {
+            if !jumped {
+                next = cursor;
+            }
+            return Some((matched && label_index == 2, next));
+        }
+
+        let label_len = len as usize;
+        if cursor + label_len > packet.len() {
+            return None;
+        }
+        let label = &packet[cursor..cursor + label_len];
+
+        if matched {
+            let this_matches = match label_index {
+                0 => bytes_eq_ascii_ignore_case(label, hostname),
+                1 => bytes_eq_ascii_ignore_case(label, b"local"),
+                _ => false,
+            };
+            if !this_matches {
+                matched = false;
+            }
+        }
+
+        label_index = label_index.saturating_add(1);
+        cursor += label_len;
+    }
+
+    None
+}
+
+fn question_matches_hostname(query: &[u8], hostname: &[u8]) -> Option<MdnsQuestionMatch> {
+    if query.len() < 12 {
+        return None;
+    }
+
+    let qdcount = u16::from_be_bytes([query[4], query[5]]) as usize;
+    let mut offset = 12usize;
+
+    for _ in 0..qdcount {
+        let (matches_name, next) = dns_name_matches_host_local(query, offset, hostname)?;
+        if next + 4 > query.len() {
+            return None;
+        }
+
+        let qtype = u16::from_be_bytes([query[next], query[next + 1]]);
+        let qclass_raw = u16::from_be_bytes([query[next + 2], query[next + 3]]);
+        let qclass = qclass_raw & 0x7fff;
+
+        if matches_name && qclass == 1 && (qtype == 1 || qtype == 28 || qtype == 255) {
+            return Some(MdnsQuestionMatch {
+                prefer_unicast_response: (qclass_raw & 0x8000) != 0,
+                qtype,
+                qclass_raw,
+            });
+        }
+
+        offset = next + 4;
+    }
+
+    None
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "mDNS response building uses fixed-size packet buffers for deterministic no_std behavior"
+)]
+fn build_mdns_response(
+    query: &[u8],
+    hostname: &[u8],
+    ip: [u8; 4],
+    out: &mut [u8],
+) -> Option<(usize, MdnsQuestionMatch)> {
+    let question = question_matches_hostname(query, hostname)?;
+
+    let question_len = hostname.len() + 12;
+    let total_len = 12 + question_len + 16;
+    if out.len() < total_len {
+        return None;
+    }
+
+    out[0] = query[0];
+    out[1] = query[1];
+    out[2] = 0x84;
+    out[3] = 0x00;
+    out[4] = 0x00;
+    out[5] = 0x01;
+    out[6] = 0x00;
+    out[7] = 0x01;
+    out[8] = 0x00;
+    out[9] = 0x00;
+    out[10] = 0x00;
+    out[11] = 0x00;
+
+    let mut q = 12usize;
+    out[q] = hostname.len() as u8;
+    q += 1;
+    out[q..q + hostname.len()].copy_from_slice(hostname);
+    q += hostname.len();
+    out[q] = 5;
+    q += 1;
+    out[q..q + 5].copy_from_slice(b"local");
+    q += 5;
+    out[q] = 0;
+    q += 1;
+    out[q..q + 2].copy_from_slice(&question.qtype.to_be_bytes());
+    q += 2;
+    out[q..q + 2].copy_from_slice(&question.qclass_raw.to_be_bytes());
+    q += 2;
+
+    let mut i = q;
+    out[i] = 0xC0;
+    out[i + 1] = 0x0C;
+    out[i + 2] = 0x00;
+    out[i + 3] = 0x01;
+    out[i + 4] = 0x80;
+    out[i + 5] = 0x01;
+    out[i + 6] = 0x00;
+    out[i + 7] = 0x00;
+    out[i + 8] = 0x00;
+    out[i + 9] = 0x78;
+    out[i + 10] = 0x00;
+    out[i + 11] = 0x04;
+    out[i + 12] = ip[0];
+    out[i + 13] = ip[1];
+    out[i + 14] = ip[2];
+    out[i + 15] = ip[3];
+    i += 16;
+
+    Some((i, question))
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "mDNS task keeps RX/TX packet buffers on stack during async loop"
+)]
+#[embassy_executor::task]
+pub(super) async fn mdns_task(stack: Stack<'static>) {
+    let rx_meta = super::MDNS_RX_META.take();
+    let tx_meta = super::MDNS_TX_META.take();
+    let rx_buffer = super::MDNS_RX_BUFFER.take();
+    let tx_buffer = super::MDNS_TX_BUFFER.take();
+    let recv_buf = super::MDNS_RECV_PACKET.take();
+    let send_buf = super::MDNS_SEND_PACKET.take();
+
+    let hostname = crate::device_hostname().as_bytes();
+
+    loop {
+        stack.wait_config_up().await;
+
+        if !stack.has_multicast_group(super::MDNS_MULTICAST) {
+            match stack.join_multicast_group(super::MDNS_MULTICAST) {
+                Ok(()) => {}
+                Err(error) => {
+                    println!("mdns: failed to join multicast group: {:?}", error);
+                    Timer::after(Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+        }
+
+        let mut socket = UdpSocket::new(stack, rx_meta, rx_buffer, tx_meta, tx_buffer);
+        if let Err(error) = socket.bind(super::MDNS_PORT) {
+            println!("mdns: bind failed: {:?}", error);
+            Timer::after(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        loop {
+            if !stack.is_config_up() {
+                break;
+            }
+
+            let (packet, meta) =
+                match with_timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await {
+                    Ok(Ok((n, meta))) => (&recv_buf[..n], meta),
+                    Ok(Err(_)) => continue,
+                    Err(_) => continue,
+                };
+
+            let Some(ip) = status::ip_octets() else {
+                continue;
+            };
+
+            let Some((n, question)) = build_mdns_response(packet, hostname, ip, send_buf) else {
+                continue;
+            };
+
+            let prefer_unicast_response = question.prefer_unicast_response;
+
+            if prefer_unicast_response {
+                if let Err(error) = socket.send_to(&send_buf[..n], meta).await {
+                    println!("mdns: unicast send failed to {:?}: {:?}", meta, error);
+                }
+            } else {
+                if let Err(error) = socket
+                    .send_to(&send_buf[..n], (super::MDNS_MULTICAST, super::MDNS_PORT))
+                    .await
+                {
+                    println!("mdns: multicast send failed: {:?}", error);
+                }
+                if let Err(error) = socket.send_to(&send_buf[..n], meta).await {
+                    println!(
+                        "mdns: fallback unicast send failed to {:?}: {:?}",
+                        meta, error
+                    );
+                }
+            }
+        }
+    }
+}
