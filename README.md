@@ -283,3 +283,13 @@ The serial console prints a compact text version of the same operational state a
 3. Run `cargo check`.
 4. Run `cargo run` to flash and monitor the device.
 5. Query `http://<hostname>.local/status` once the device joins the network.
+
+## License
+
+This project is licensed under the BSD 3-Clause License.
+
+Copyright (c) 2026 David Bannister
+
+Source files include SPDX identifiers:
+
+- `SPDX-License-Identifier: BSD-3-Clause`
