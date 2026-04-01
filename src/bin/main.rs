@@ -193,7 +193,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut status_print_cycle = 0u32;
 
     loop {
-        let (color, heating_on) = controller::control_step(
+        let (_color, _heating_on) = controller::control_step(
             &mut delay,
             &mut one_wire_pin,
             &mut relay,
@@ -202,20 +202,38 @@ async fn main(spawner: Spawner) -> ! {
         )
         .await;
 
-        // Check for HTTP request activity and show blue LED blink
-        let display_color = if status::http_request_activity() {
-            controller::Rgb8 {
+        // Steady green after boot. During HTTP exchanges, show blue; on HTTP error, show red.
+        // Outside HTTP exchanges, any runtime error (for example sensor probe failures) is red.
+        let display_color = match status::http_led_state() {
+            status::HttpLedState::Idle => {
+                if status::runtime_error_active() {
+                    controller::Rgb8 {
+                        red: 10,
+                        green: 0,
+                        blue: 0,
+                    }
+                } else {
+                    controller::Rgb8 {
+                        red: 0,
+                        green: 4,
+                        blue: 0,
+                    }
+                }
+            }
+            status::HttpLedState::ActiveOk => controller::Rgb8 {
                 red: 0,
                 green: 0,
                 blue: 10,
-            }
-        } else {
-            color
+            },
+            status::HttpLedState::ActiveError => controller::Rgb8 {
+                red: 10,
+                green: 0,
+                blue: 0,
+            },
         };
 
         let frame = pixel_frame(display_color);
         neopixel = neopixel.transmit(&frame).unwrap().wait().unwrap();
-        let _ = heating_on;
         status_print_cycle += 1;
         if status_print_cycle >= print_every_cycles {
             status_print_cycle = 0;

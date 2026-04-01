@@ -59,6 +59,10 @@ pub fn sensor_status_label(code: u8) -> &'static str {
     SensorStatus::from_u8(code).label()
 }
 
+pub fn runtime_error_active() -> bool {
+    LAST_SENSOR_STATUS.load(Ordering::Relaxed) != SensorStatus::None as u8
+}
+
 const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
 const TARGET_TEMP_MIN_CENTI: i32 = 0;
 const TARGET_TEMP_MAX_CENTI: i32 = 15_000;
@@ -96,7 +100,8 @@ static LAST_SENSOR_STATUS: AtomicU8 = AtomicU8::new(SensorStatus::NoDevice as u8
 static LAST_LED_RED: AtomicU8 = AtomicU8::new(0);
 static LAST_LED_GREEN: AtomicU8 = AtomicU8::new(0);
 static LAST_LED_BLUE: AtomicU8 = AtomicU8::new(0);
-static HTTP_REQUEST_ACTIVITY: AtomicBool = AtomicBool::new(false);
+static HTTP_EXCHANGE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static HTTP_EXCHANGE_ERROR: AtomicBool = AtomicBool::new(false);
 static LAST_PID_WINDOW_STEP: AtomicU8 = AtomicU8::new(0);
 static LAST_PID_ON_STEPS: AtomicU8 = AtomicU8::new(0);
 // Device IP packed as big-endian u32; use .to_be_bytes() to recover [u8; 4].
@@ -734,12 +739,37 @@ pub fn mark_ntp_peer_query_failed(source: shared::NtpSource, server: [u8; 4]) {
     });
 }
 
-pub fn http_request_received() {
-    HTTP_REQUEST_ACTIVITY.store(true, Ordering::Relaxed);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HttpLedState {
+    Idle,
+    ActiveOk,
+    ActiveError,
 }
 
-pub fn http_request_activity() -> bool {
-    HTTP_REQUEST_ACTIVITY.swap(false, Ordering::Relaxed)
+pub fn http_exchange_begin() {
+    HTTP_EXCHANGE_ERROR.store(false, Ordering::Relaxed);
+    HTTP_EXCHANGE_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+pub fn http_exchange_mark_error() {
+    if HTTP_EXCHANGE_ACTIVE.load(Ordering::Relaxed) {
+        HTTP_EXCHANGE_ERROR.store(true, Ordering::Relaxed);
+    }
+}
+
+pub fn http_exchange_end() {
+    HTTP_EXCHANGE_ACTIVE.store(false, Ordering::Relaxed);
+    HTTP_EXCHANGE_ERROR.store(false, Ordering::Relaxed);
+}
+
+pub fn http_led_state() -> HttpLedState {
+    if !HTTP_EXCHANGE_ACTIVE.load(Ordering::Relaxed) {
+        HttpLedState::Idle
+    } else if HTTP_EXCHANGE_ERROR.load(Ordering::Relaxed) {
+        HttpLedState::ActiveError
+    } else {
+        HttpLedState::ActiveOk
+    }
 }
 
 pub fn current_unix_time_micros() -> Option<u64> {

@@ -9,6 +9,7 @@ It reads a DS18B20 temperature sensor, drives a solid-state relay with a PID loo
 - Runs a PID controller once per second.
 - Drives an SSR on GPIO12 using a 10-step time window.
 - Shows basic device state on a WS2812/NeoPixel on GPIO48.
+- Uses LED signaling for boot/HTTP activity and HTTP errors.
 - Connects to Wi-Fi in station mode.
 - Advertises `<hostname>.local` over mDNS (IPv4 and IPv6 when configured).
 - Advertises an mDNS HTTP service at `_http._tcp.local`.
@@ -46,6 +47,14 @@ The PID output is converted to a 10-step relay window:
 - `0%` means relay always off
 - `100%` means relay always on
 - intermediate values map to `0..10` relay-on steps per window
+
+LED behavior:
+
+- After boot completes, LED is steady green.
+- During an HTTP exchange, LED switches to blue for the duration of the request/response.
+- If the active HTTP exchange has an error status (non-200) or socket read/write failure, LED is red for the duration of that exchange.
+- Outside HTTP exchanges, any runtime error (for example a failed DS18B20 probe read) makes LED steady red.
+- When no HTTP exchange is active and no runtime error is present, LED is steady green.
 
 ## Network Features
 

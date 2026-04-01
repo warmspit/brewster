@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 David Bannister
 
-use core::fmt::Write as _;
 use alloc::string::ToString;
+use core::fmt::Write as _;
 use embassy_net::Stack;
 use embassy_net::tcp::{Error as TcpError, TcpSocket};
 use embassy_time::{Duration, Timer};
@@ -214,6 +214,8 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
             }
         }
 
+        status::http_exchange_begin();
+
         let remote = socket.remote_endpoint();
         let parsed = match socket
             .read_with(|buf| {
@@ -228,21 +230,24 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
             Ok(Some(req)) => req,
             Ok(None) => {
                 println!("http: empty request from {:?}", remote);
+                status::http_exchange_mark_error();
                 socket.abort();
                 let _ = socket.flush().await;
+                status::http_exchange_end();
                 continue;
             }
             Err(error) => {
                 println!("http: read failed from {:?}: {:?}", remote, error);
+                status::http_exchange_mark_error();
                 socket.abort();
                 let _ = socket.flush().await;
+                status::http_exchange_end();
                 continue;
             }
         };
 
         let (status_line, content_type, body) = match parsed {
             ParsedRequest::GetStatus => {
-                status::http_request_received();
                 println!("http: serving status to {:?}", remote);
                 (
                     "200 OK",
@@ -251,7 +256,6 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                 )
             }
             ParsedRequest::GetMetrics => {
-                status::http_request_received();
                 println!("http: serving metrics to {:?}", remote);
                 (
                     "200 OK",
@@ -260,7 +264,6 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                 )
             }
             ParsedRequest::PostTemperature(temp) => {
-                status::http_request_received();
                 if !(0.0_f32..=150.0).contains(&temp) {
                     (
                         "400 Bad Request",
@@ -294,36 +297,33 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                     }
                 }
             }
-            ParsedRequest::PostProbeName(name) => {
-                status::http_request_received();
-                match status::set_temp_probe_name(&name) {
-                    Ok(()) => {
-                        println!("http: probe name set to '{}' from {:?}", name, remote);
-                        (
-                            "200 OK",
-                            "application/json",
-                            ResponseBody::Owned(probe_name_ok_json(&status::temp_probe_name())),
-                        )
-                    }
-                    Err(status::ProbeNameError::Empty) => (
-                        "400 Bad Request",
+            ParsedRequest::PostProbeName(name) => match status::set_temp_probe_name(&name) {
+                Ok(()) => {
+                    println!("http: probe name set to '{}' from {:?}", name, remote);
+                    (
+                        "200 OK",
                         "application/json",
-                        ResponseBody::Static("{\n  \"error\": \"empty_probe_name\"\n}\n"),
-                    ),
-                    Err(status::ProbeNameError::TooLong) => (
-                        "400 Bad Request",
-                        "application/json",
-                        ResponseBody::Static("{\n  \"error\": \"probe_name_too_long\"\n}\n"),
-                    ),
-                    Err(status::ProbeNameError::InvalidChar) => (
-                        "400 Bad Request",
-                        "application/json",
-                        ResponseBody::Static(
-                            "{\n  \"error\": \"invalid_probe_name\", \"allowed\": \"[A-Za-z0-9 ._-]\"\n}\n",
-                        ),
-                    ),
+                        ResponseBody::Owned(probe_name_ok_json(&status::temp_probe_name())),
+                    )
                 }
-            }
+                Err(status::ProbeNameError::Empty) => (
+                    "400 Bad Request",
+                    "application/json",
+                    ResponseBody::Static("{\n  \"error\": \"empty_probe_name\"\n}\n"),
+                ),
+                Err(status::ProbeNameError::TooLong) => (
+                    "400 Bad Request",
+                    "application/json",
+                    ResponseBody::Static("{\n  \"error\": \"probe_name_too_long\"\n}\n"),
+                ),
+                Err(status::ProbeNameError::InvalidChar) => (
+                    "400 Bad Request",
+                    "application/json",
+                    ResponseBody::Static(
+                        "{\n  \"error\": \"invalid_probe_name\", \"allowed\": \"[A-Za-z0-9 ._-]\"\n}\n",
+                    ),
+                ),
+            },
             ParsedRequest::BadRequest => (
                 "400 Bad Request",
                 "application/json",
@@ -339,16 +339,23 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
             }
         };
 
+        if !status_line.starts_with("200") {
+            status::http_exchange_mark_error();
+        }
+
         if let Err(error) =
             socket_write_http_response(&mut socket, status_line, content_type, body.as_str()).await
         {
             println!("http: write failed to {:?}: {:?}", remote, error);
+            status::http_exchange_mark_error();
             socket.abort();
             let _ = socket.flush().await;
+            status::http_exchange_end();
             continue;
         }
 
         socket.close();
         let _ = socket.flush().await;
+        status::http_exchange_end();
     }
 }
