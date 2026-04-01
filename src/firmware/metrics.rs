@@ -977,5 +977,8 @@ pub fn prometheus() -> String {
         }
     }
 
-    out
+    // Replace the hardcoded "brewster_" prefix with the device hostname across
+    // all HELP, TYPE, and sample lines so metrics are named after the device.
+    let prefix = alloc::format!("{}_", device_hostname());
+    out.replace("brewster_", &prefix)
 }
