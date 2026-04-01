@@ -10,7 +10,8 @@ It reads a DS18B20 temperature sensor, drives a solid-state relay with a PID loo
 - Drives an SSR on GPIO12 using a 10-step time window.
 - Shows basic device state on a WS2812/NeoPixel on GPIO48.
 - Connects to Wi-Fi in station mode.
-- Advertises `<hostname>.local` over mDNS.
+- Advertises `<hostname>.local` over mDNS (IPv4 and IPv6 when configured).
+- Advertises an mDNS HTTP service at `_http._tcp.local`.
 - Serves JSON status over HTTP on port 80.
 - Exposes Prometheus metrics over HTTP on `/metrics`.
 - Accepts target temperature updates over HTTP.
@@ -50,11 +51,54 @@ The PID output is converted to a 10-step relay window:
 
 ### mDNS
 
-The device responds to:
+The device responds to and periodically announces:
 
 - `<hostname>.local`
+- `_http._tcp.local` service discovery
+
+Announcement and response details:
+
+- Joins IPv4 mDNS multicast `224.0.0.251:5353`.
+- Joins IPv6 mDNS multicast `ff02::fb:5353`.
+- Publishes `A` records for `<hostname>.local` when IPv4 is configured.
+- Publishes `AAAA` records for `<hostname>.local` when IPv6 is configured.
+- Publishes `PTR`, `SRV`, and `TXT` records for the HTTP service.
+
+Quick checks:
+
+```sh
+dns-sd -G v4v6 brewster.local
+dns-sd -B _http._tcp local
+dns-sd -L brewster _http._tcp local
+```
 
 The hostname comes from configuration and is normalized into a DHCP-safe format.
+
+### Troubleshooting mDNS
+
+If discovery fails from another machine, check these first.
+
+On the Brewster serial console, confirm Wi-Fi and hostname state:
+
+- `wifi: got IPv4 address ...`
+- `wifi: hostname=...`
+
+From another machine on the same LAN:
+
+```sh
+dns-sd -G v4v6 <hostname>.local
+dns-sd -B _http._tcp local
+dns-sd -L <hostname> _http._tcp local
+```
+
+If it still fails, common causes are:
+
+- Device and client are on different VLANs/subnets without an mDNS reflector.
+- AP/router has multicast isolation/filtering enabled.
+- Client resolver cache is stale (flush cache or retry after reconnect).
+- IPv6-only lookup path with no configured IPv6 address on the device.
+
+Host lookup should still work over IPv4 when DHCPv4 is up.
 
 ### HTTP
 
@@ -192,6 +236,13 @@ Current project defaults:
 - linker: Xtensa GCC from the local ESP toolchain
 - runner: `espflash flash --monitor --chip esp32s3 --partition-table partitions.csv`
 - build-std: `core`, `alloc`
+
+Network protocol support in this build:
+
+- IPv4: enabled and configured with DHCPv4.
+- IPv6: protocol support enabled in `embassy-net`.
+
+Note: IPv6 mDNS (`AAAA`) is emitted only when the stack has an IPv6 address configured at runtime.
 
 In new terminals, load the ESP environment before running cargo commands:
 
