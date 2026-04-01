@@ -12,7 +12,7 @@ test = false
 bench = false
 
 [dependencies]
-embassy-net = { version = "0.7.1", features = ["dhcpv4", "dhcpv4-hostname", "medium-ethernet", "multicast", "proto-ipv4", "tcp", "udp"] }
+embassy-net = { version = "0.7.1", features = ["dhcpv4", "dhcpv4-hostname", "medium-ethernet", "multicast", "proto-ipv4", "proto-ipv6", "tcp", "udp"] }
 
 esp-hal = { version = "~1.0", features = ["esp32s3", "unstable"] }
 
