@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 use alloc::string::ToString;
 
 #[path = "network/http.rs"]

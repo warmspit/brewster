@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 use core::fmt::Write as _;
 use embassy_net::Stack;
 use embassy_net::tcp::{Error as TcpError, TcpSocket};

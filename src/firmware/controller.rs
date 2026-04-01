@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 use embassy_time::{Duration, Timer};
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Flex, Level, Output};

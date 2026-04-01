@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 #![no_std]
 #![no_main]
 #![deny(
@@ -140,7 +143,10 @@ async fn main(spawner: Spawner) -> ! {
         .configure_tx(peripherals.GPIO48, led_config)
         .unwrap();
 
-    let mut pid = Pid::new(status::get_target_temp_c(), config::PID_OUTPUT_LIMIT_PERCENT);
+    let mut pid = Pid::new(
+        status::get_target_temp_c(),
+        config::PID_OUTPUT_LIMIT_PERCENT,
+    );
     pid.p(PID_KP, config::PID_OUTPUT_LIMIT_PERCENT)
         .i(PID_KI, config::PID_OUTPUT_LIMIT_PERCENT)
         .d(PID_KD, config::PID_OUTPUT_LIMIT_PERCENT);

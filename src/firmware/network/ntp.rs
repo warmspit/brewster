@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_net::udp::{PacketMetadata, UdpSocket};

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 fn main() {
     inject_local_wifi_env();
     linker_be_nice();

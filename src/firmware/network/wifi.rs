@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 use alloc::string::ToString;
 use embassy_net::Stack;
 use embassy_time::{Duration, Timer, with_timeout};

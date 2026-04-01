@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 //! Unified error type for the firmware.
 //!
 //! This module provides a single FirmwareError enum that consolidates all error

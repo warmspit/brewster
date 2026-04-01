@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 David Bannister
+
 # Build OpenOCD 1.0 from source for ESP32-S3 USB JTAG support
 # This bypasses the OpenOCD 0.12.0 descriptor bug
 

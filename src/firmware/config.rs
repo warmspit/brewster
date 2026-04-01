@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 David Bannister
+
 pub const CONTROL_PERIOD_MS: u64 = 1_000;
 pub const DS18B20_CONVERSION_MS: u64 = 750;
 pub const STATUS_PRINT_EVERY_SECONDS_DEFAULT: u64 = 5;
