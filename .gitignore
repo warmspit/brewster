@@ -6,7 +6,6 @@ target/
 TODO
 
 # Editor configuration
-.vscode/
 .zed/
 .helix/
 .nvim.lua
