@@ -8,10 +8,13 @@
 
 use embassy_net::Stack;
 use embassy_net::udp::UdpSocket;
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_println::println;
 
-use crate::firmware::status;
+use crate::firmware::{shared, status};
+
+const MDNS_TTL_SECS: u32 = 120;
+const MDNS_ANNOUNCE_INTERVAL_SECS: u64 = 30;
 
 fn eq_ascii_ignore_case(a: u8, b: u8) -> bool {
     a.eq_ignore_ascii_case(&b)
@@ -125,7 +128,9 @@ fn question_matches_hostname(query: &[u8], hostname: &[u8]) -> Option<MdnsQuesti
         let qclass_raw = u16::from_be_bytes([query[next + 2], query[next + 3]]);
         let qclass = qclass_raw & 0x7fff;
 
-        if matches_name && qclass == 1 && (qtype == 1 || qtype == 28 || qtype == 255) {
+        // This responder only advertises IPv4 (A) records.
+        // Replying to AAAA queries with an A answer is non-compliant and can be ignored by resolvers.
+        if matches_name && qclass == 1 && (qtype == 1 || qtype == 255) {
             return Some(MdnsQuestionMatch {
                 prefer_unicast_response: (qclass_raw & 0x8000) != 0,
                 qtype,
@@ -208,6 +213,53 @@ fn build_mdns_response(
     Some((i, question))
 }
 
+fn build_mdns_announcement(hostname: &[u8], ip: [u8; 4], out: &mut [u8]) -> Option<usize> {
+    let total_len = 12 + hostname.len() + 18;
+    if out.len() < total_len {
+        return None;
+    }
+
+    // Unsolicited mDNS answer packet.
+    out[0] = 0x00;
+    out[1] = 0x00;
+    out[2] = 0x84;
+    out[3] = 0x00;
+    out[4] = 0x00;
+    out[5] = 0x00;
+    out[6] = 0x00;
+    out[7] = 0x01;
+    out[8] = 0x00;
+    out[9] = 0x00;
+    out[10] = 0x00;
+    out[11] = 0x00;
+
+    let mut i = 12usize;
+    out[i] = hostname.len() as u8;
+    i += 1;
+    out[i..i + hostname.len()].copy_from_slice(hostname);
+    i += hostname.len();
+    out[i] = 5;
+    i += 1;
+    out[i..i + 5].copy_from_slice(b"local");
+    i += 5;
+    out[i] = 0;
+    i += 1;
+
+    // TYPE=A, CLASS=IN | cache-flush, TTL, RDLENGTH=4, RDATA=IPv4.
+    out[i..i + 2].copy_from_slice(&1u16.to_be_bytes());
+    i += 2;
+    out[i..i + 2].copy_from_slice(&0x8001u16.to_be_bytes());
+    i += 2;
+    out[i..i + 4].copy_from_slice(&MDNS_TTL_SECS.to_be_bytes());
+    i += 4;
+    out[i..i + 2].copy_from_slice(&4u16.to_be_bytes());
+    i += 2;
+    out[i..i + 4].copy_from_slice(&ip);
+    i += 4;
+
+    Some(i)
+}
+
 #[allow(
     clippy::large_stack_frames,
     reason = "mDNS task keeps RX/TX packet buffers on stack during async loop"
@@ -221,7 +273,9 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
     let recv_buf = super::MDNS_RECV_PACKET.take();
     let send_buf = super::MDNS_SEND_PACKET.take();
 
-    let hostname = crate::device_hostname().as_bytes();
+    // Reuse the same hostname normalization policy used by DHCP hostnames.
+    let normalized_hostname = shared::normalized_dhcp_hostname(crate::device_hostname());
+    let hostname = normalized_hostname.as_bytes();
 
     loop {
         stack.wait_config_up().await;
@@ -244,9 +298,24 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
             continue;
         }
 
+        let mut announce_deadline = Instant::now();
+
         loop {
             if !stack.is_config_up() {
                 break;
+            }
+
+            if Instant::now() >= announce_deadline {
+                if let Some(ip) = status::ip_octets()
+                    && let Some(n) = build_mdns_announcement(hostname, ip, send_buf)
+                    && let Err(error) = socket
+                        .send_to(&send_buf[..n], (super::MDNS_MULTICAST, super::MDNS_PORT))
+                        .await
+                {
+                    println!("mdns: announce send failed: {:?}", error);
+                }
+                announce_deadline =
+                    Instant::now() + Duration::from_secs(MDNS_ANNOUNCE_INTERVAL_SECS);
             }
 
             let (packet, meta) =

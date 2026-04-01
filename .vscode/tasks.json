@@ -1,0 +1,150 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-and-flash-esp32s3",
+      "type": "shell",
+      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf && espflash flash --partition-table partitions.csv target/xtensa-esp32s3-none-elf/debug/brewster",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "cargo build",
+      "type": "shell",
+      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf",
+      "group": "build",
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "cargo check",
+      "type": "shell",
+      "command": ". ~/export-esp.sh && cargo check --target xtensa-esp32s3-none-elf",
+      "group": "build",
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "flash (espflash)",
+      "type": "shell",
+      "command": ". ~/export-esp.sh && espflash flash --partition-table partitions.csv target/xtensa-esp32s3-none-elf/debug/brewster",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "monitor (serial)",
+      "type": "shell",
+      "command": "stty -f /dev/cu.usbmodem2101 115200 raw -echo -crtscts && echo 'ESP serial monitor ready' && cat /dev/cu.usbmodem2101",
+      "isBackground": true,
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated"
+      },
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "message": 0
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^.*$",
+          "endsPattern": "^ESP serial monitor ready$"
+        }
+      }
+    },
+    {
+      "label": "openocd",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/openocd-esp32s3-debug.sh",
+      "isBackground": true,
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "message": 0
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^Open On-Chip Debugger.*$",
+          "endsPattern": "^Info : Listening on port 3333 for gdb connections$"
+        }
+      }
+    },
+    {
+      "label": "debug-server",
+      "type": "shell",
+      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf && espflash flash --partition-table partitions.csv target/xtensa-esp32s3-none-elf/debug/brewster && ${workspaceFolder}/scripts/openocd-esp32s3-debug.sh",
+      "isBackground": true,
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "message": 0
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^.*cargo build.*$|^Open On-Chip Debugger.*$",
+          "endsPattern": "^Info : Listening on port 3333 for gdb connections$"
+        }
+      }
+    },
+    {
+      "label": "debug-server-with-serial-monitor",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "debug-server",
+        "monitor (serial)"
+      ]
+    },
+    {
+      "label": "openocd-with-serial-monitor",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "openocd",
+        "monitor (serial)"
+      ]
+    }
+  ]
+}

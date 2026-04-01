@@ -159,6 +159,7 @@ That file is intentionally ignored by git and is read by `build.rs`, which injec
 Create `.cargo/config.local.toml` with values like:
 
 ```toml
+[env]
 SSID = "your-ssid"
 PASSWORD = "your-password"
 DEVICE_HOSTNAME = "brewster"

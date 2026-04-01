@@ -1,0 +1,59 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug ESP32-S3 (USB JTAG)",
+      "type": "cppdbg",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "program": "${workspaceFolder}/target/xtensa-esp32s3-none-elf/debug/brewster",
+      "preLaunchTask": "debug-server-with-serial-monitor",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "targetArchitecture": "x86_64",
+      "miDebuggerPath": "/Users/david/.espressif/tools/xtensa-esp-elf-gdb/16.3_20250913/xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb",
+      "miDebuggerServerAddress": "localhost:3333",
+      "setupCommands": [
+        {
+          "description": "Enable Rust pretty printing",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Allow GDB longer to interrupt a sleeping MCU (waiti 0)",
+          "text": "set remotetimeout 10",
+          "ignoreFailures": true
+        }
+      ],
+      "launchCompleteCommand": "exec-continue"
+    },
+    {
+      "name": "Attach ESP32-S3 (USB JTAG)",
+      "type": "cppdbg",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "program": "${workspaceFolder}/target/xtensa-esp32s3-none-elf/debug/brewster",
+      "preLaunchTask": "openocd-with-serial-monitor",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "targetArchitecture": "x86_64",
+      "miDebuggerPath": "/Users/david/.espressif/tools/xtensa-esp-elf-gdb/16.3_20250913/xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb",
+      "miDebuggerServerAddress": "localhost:3333",
+      "setupCommands": [
+        {
+          "description": "Enable Rust pretty printing",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Allow GDB longer to interrupt a sleeping MCU (waiti 0)",
+          "text": "set remotetimeout 10",
+          "ignoreFailures": true
+        }
+      ],
+      "launchCompleteCommand": "exec-continue"
+    }
+  ]
+}

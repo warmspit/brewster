@@ -71,8 +71,7 @@ pub async fn wifi_connection_task(
 
         connect_attempts = connect_attempts.saturating_add(1);
         let should_scan = !stack.is_link_up()
-            && (connect_attempts == 1
-                || connect_attempts.is_multiple_of(scan_interval_attempts));
+            && (connect_attempts == 1 || connect_attempts.is_multiple_of(scan_interval_attempts));
         if should_scan {
             esp_println::println!("wifi: scanning nearby SSIDs...");
             match with_timeout(
@@ -91,7 +90,10 @@ pub async fn wifi_connection_task(
                         };
                         esp_println::println!(
                             "wifi: ap ssid='{}' ch={} rssi={} auth={:?}",
-                            ssid, ap.channel, ap.signal_strength, ap.auth_method
+                            ssid,
+                            ap.channel,
+                            ap.signal_strength,
+                            ap.auth_method
                         );
                     }
                 }
@@ -148,6 +150,7 @@ pub async fn wifi_status_task(stack: Stack<'static>) {
             Ok(()) => {
                 if let Some(config) = stack.config_v4() {
                     esp_println::println!("wifi: got IPv4 address {}", config.address);
+                    esp_println::println!("wifi: hostname={}", crate::device_hostname());
                     crate::firmware::status::update_ip_from_cidr(&config.address.to_string());
                     if let Some(gateway) = config.gateway {
                         crate::firmware::status::update_dhcp_ntp_server(gateway.octets());
