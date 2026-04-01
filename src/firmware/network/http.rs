@@ -2,6 +2,7 @@
 // Copyright (c) 2026 David Bannister
 
 use core::fmt::Write as _;
+use alloc::string::ToString;
 use embassy_net::Stack;
 use embassy_net::tcp::{Error as TcpError, TcpSocket};
 use embassy_time::{Duration, Timer};
@@ -40,11 +41,60 @@ fn temperature_ok_json(temp_c: f32) -> alloc::string::String {
     body
 }
 
-#[derive(Clone, Copy)]
+fn probe_name_ok_json(name: &str) -> alloc::string::String {
+    let mut body = alloc::string::String::with_capacity(96);
+    let _ = write!(
+        body,
+        concat!(
+            "{{\n",
+            "  \"ok\": true,\n",
+            "  \"probe_name\": \"{}\"\n",
+            "}}\n"
+        ),
+        name
+    );
+    body
+}
+
+fn parse_json_string_field(body: &str, key: &str) -> Option<alloc::string::String> {
+    let mut pattern = alloc::string::String::with_capacity(key.len() + 2);
+    pattern.push('"');
+    pattern.push_str(key);
+    pattern.push('"');
+    let key_pos = body.find(&pattern)?;
+    let after_key = &body[key_pos + pattern.len()..];
+    let colon_pos = after_key.find(':')?;
+    let mut value = after_key[colon_pos + 1..].trim_start();
+    if !value.starts_with('"') {
+        return None;
+    }
+    value = &value[1..];
+    let end_quote = value.find('"')?;
+    Some(value[..end_quote].to_string())
+}
+
+fn parse_probe_name(buf: &[u8]) -> Option<alloc::string::String> {
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let body = core::str::from_utf8(&buf[header_end + 4..]).ok()?.trim();
+    if body.is_empty() {
+        return None;
+    }
+    if body.starts_with('{') {
+        return parse_json_string_field(body, "probe_name")
+            .or_else(|| parse_json_string_field(body, "name"));
+    }
+    if body.starts_with('"') && body.ends_with('"') && body.len() >= 2 {
+        return Some(body[1..body.len() - 1].to_string());
+    }
+    Some(body.to_string())
+}
+
+#[derive(Clone)]
 enum ParsedRequest {
     GetStatus,
     GetMetrics,
     PostTemperature(f32),
+    PostProbeName(alloc::string::String),
     BadRequest,
     NotFound,
 }
@@ -96,6 +146,13 @@ fn parse_request(buf: &[u8]) -> ParsedRequest {
             return ParsedRequest::PostTemperature(v);
         }
         return ParsedRequest::BadRequest;
+    }
+
+    if buf.starts_with(b"POST /probe-name ") || buf.starts_with(b"POST /probe-name\r") {
+        return match parse_probe_name(buf) {
+            Some(name) => ParsedRequest::PostProbeName(name),
+            None => ParsedRequest::BadRequest,
+        };
     }
 
     ParsedRequest::NotFound
@@ -235,6 +292,36 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                             )
                         }
                     }
+                }
+            }
+            ParsedRequest::PostProbeName(name) => {
+                status::http_request_received();
+                match status::set_temp_probe_name(&name) {
+                    Ok(()) => {
+                        println!("http: probe name set to '{}' from {:?}", name, remote);
+                        (
+                            "200 OK",
+                            "application/json",
+                            ResponseBody::Owned(probe_name_ok_json(&status::temp_probe_name())),
+                        )
+                    }
+                    Err(status::ProbeNameError::Empty) => (
+                        "400 Bad Request",
+                        "application/json",
+                        ResponseBody::Static("{\n  \"error\": \"empty_probe_name\"\n}\n"),
+                    ),
+                    Err(status::ProbeNameError::TooLong) => (
+                        "400 Bad Request",
+                        "application/json",
+                        ResponseBody::Static("{\n  \"error\": \"probe_name_too_long\"\n}\n"),
+                    ),
+                    Err(status::ProbeNameError::InvalidChar) => (
+                        "400 Bad Request",
+                        "application/json",
+                        ResponseBody::Static(
+                            "{\n  \"error\": \"invalid_probe_name\", \"allowed\": \"[A-Za-z0-9 ._-]\"\n}\n",
+                        ),
+                    ),
                 }
             }
             ParsedRequest::BadRequest => (

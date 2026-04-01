@@ -42,6 +42,10 @@ pub fn device_hostname() -> &'static str {
     config::device_hostname()
 }
 
+pub fn temp_probe_name() -> &'static str {
+    config::temp_probe_name()
+}
+
 fn status_print_interval_cycles() -> u32 {
     config::status_print_interval_cycles()
 }
@@ -95,6 +99,14 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    if let Err(error) = status::set_temp_probe_name(temp_probe_name()) {
+        println!(
+            "probe name config invalid ({:?}), using default {}",
+            error,
+            status::temp_probe_name()
+        );
+    }
+
     let restored_target = status::init_persistent_target(peripherals.FLASH);
     if let Some(target_c) = restored_target {
         println!(
@@ -121,8 +133,9 @@ async fn main(spawner: Spawner) -> ! {
 
     println!("{} booting", device_hostname());
     println!(
-        "target={:.1}C pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr:GPIO12, led:GPIO48}}",
+        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr:GPIO12, led:GPIO48}}",
         status::get_target_temp_c(),
+        status::temp_probe_name(),
         PID_KP,
         PID_KI,
         PID_KD,

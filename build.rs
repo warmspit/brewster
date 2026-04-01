@@ -20,6 +20,7 @@ fn inject_local_wifi_env() {
         "SSID",
         "PASSWORD",
         "DEVICE_HOSTNAME",
+        "TEMP_PROBE_NAME",
         "WIFI_SCAN_EVERY_ATTEMPTS",
         "STATUS_PRINT_EVERY_SECONDS",
         "NTP_SERVERS",

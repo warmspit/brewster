@@ -14,6 +14,7 @@ It reads a DS18B20 temperature sensor, drives a solid-state relay with a PID loo
 - Serves JSON status over HTTP on port 80.
 - Exposes Prometheus metrics over HTTP on `/metrics`.
 - Accepts target temperature updates over HTTP.
+- Supports assigning a custom name to the DS18B20 temperature probe.
 - Syncs time from configured NTP servers or the DHCP gateway.
 - Stores the target temperature in the `cfg` flash partition.
 
@@ -65,6 +66,7 @@ Supported routes:
 - `GET /status`
 - `GET /metrics`
 - `POST /temperature`
+- `POST /probe-name`
 
 `GET /` and `GET /status` return the same JSON status document.
 
@@ -89,6 +91,17 @@ curl -X POST http://brewster.local/temperature \
 ```
 
 Accepted temperature range is `0.0..=150.0` degrees C.
+
+To set a probe name:
+
+```sh
+curl -X POST http://brewster.local/probe-name \
+  -H 'Content-Type: application/json' \
+  -d '{"probe_name": "kettle"}'
+```
+
+Allowed characters for probe names: `A-Z`, `a-z`, `0-9`, space, `.`, `_`, and `-`.
+Maximum length: `32` characters.
 
 ### Prometheus Metrics
 
@@ -151,6 +164,7 @@ PASSWORD = "your-password"
 DEVICE_HOSTNAME = "brewster"
 WIFI_SCAN_EVERY_ATTEMPTS = "6"
 STATUS_PRINT_EVERY_SECONDS = "5"
+TEMP_PROBE_NAME = "probe-1"
 NTP_SERVERS = "129.6.15.28,194.58.204.20"
 # Optional fallback when NTP_SERVERS is empty or invalid
 NTP_SERVER = "8.8.8.8"
@@ -163,6 +177,7 @@ Supported keys:
 - `DEVICE_HOSTNAME`: advertised hostname and DHCP hostname base
 - `WIFI_SCAN_EVERY_ATTEMPTS`: how often failed connection retries trigger a Wi-Fi scan
 - `STATUS_PRINT_EVERY_SECONDS`: serial console status print interval
+- `TEMP_PROBE_NAME`: default DS18B20 probe name at boot
 - `NTP_SERVERS`: comma-separated IPv4 NTP server list
 - `NTP_SERVER`: single IPv4 fallback NTP server
 
@@ -257,6 +272,7 @@ build.rs                  Build-time env injection and linker diagnostics
 
 - device hostname
 - DS18B20 reading or sensor error state
+- DS18B20 probe name
 - PID target and output
 - relay state
 - LED RGB state

@@ -15,6 +15,8 @@ pub const PID_KD: f32 = 6.0;
 
 pub const DEVICE_HOSTNAME_DEFAULT: &str = "brewster";
 pub const DEVICE_HOSTNAME_CONFIG: Option<&str> = option_env!("DEVICE_HOSTNAME");
+pub const TEMP_PROBE_NAME_DEFAULT: &str = "probe-1";
+pub const TEMP_PROBE_NAME_CONFIG: Option<&str> = option_env!("TEMP_PROBE_NAME");
 
 pub const WS2812_T0H_TICKS: u16 = 4;
 pub const WS2812_T0L_TICKS: u16 = 9;
@@ -44,5 +46,12 @@ pub fn device_hostname() -> &'static str {
     match DEVICE_HOSTNAME_CONFIG {
         Some(v) if !v.is_empty() => v,
         _ => DEVICE_HOSTNAME_DEFAULT,
+    }
+}
+
+pub fn temp_probe_name() -> &'static str {
+    match TEMP_PROBE_NAME_CONFIG {
+        Some(v) if !v.is_empty() => v,
+        _ => TEMP_PROBE_NAME_DEFAULT,
     }
 }

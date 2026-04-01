@@ -11,8 +11,8 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use crate::{PID_KD, PID_KI, PID_KP, device_hostname};
 use super::{shared, status};
+use crate::{PID_KD, PID_KI, PID_KP, device_hostname};
 
 fn ntp_peer_snapshots() -> heapless::Vec<NtpPeerSnapshot, NTP_MAX_TRACKED_PEERS> {
     status::ntp_peers_snapshot()
@@ -141,6 +141,7 @@ pub fn json() -> String {
     let ntp_uptime_at_sync = snapshot.ntp_uptime_at_sync;
     let current_ntp_time = snapshot.current_ntp_time;
     let master_ip = snapshot.master_ip;
+    let probe_name = snapshot.probe_name;
 
     let ntp_source = shared::NtpSource::from_u8(ntp_source_code);
     let net_state = status::NetState::from_u8(net_state_code);
@@ -181,9 +182,11 @@ pub fn json() -> String {
             "  \"device\": \"{}\",\n",
             "  \"sensor\": {{\n",
             "    \"ds18b20\": {{\n",
+            "      \"name\": \"{}\",\n",
             "      \"temperature_c\": ",
         ),
         device_hostname(),
+        probe_name,
     );
     if let Some((temp_c, _)) = temp_cf {
         let _ = write!(out, "{:.2}", temp_c);
@@ -433,6 +436,7 @@ pub fn text() -> String {
     let ip_valid = snapshot.ip_valid;
     let net_state_code = snapshot.net_state_code;
     let ip_octets = snapshot.ip_octets;
+    let probe_name = snapshot.probe_name;
 
     let net_state = status::NetState::from_u8(net_state_code);
 
@@ -452,7 +456,8 @@ pub fn text() -> String {
     if temp_centi == UNKNOWN_TEMPERATURE_CENTI {
         let _ = write!(
             out,
-            " sensor={} target={:.1}C/{:.1}F pid={:.1}% relay={} led=({}, {}, {}) heap_free={}B",
+            " probe={} sensor={} target={:.1}C/{:.1}F pid={:.1}% relay={} led=({}, {}, {}) heap_free={}B",
+            probe_name,
             status::sensor_status_label(sensor_status_code),
             target_c,
             target_f,
@@ -469,7 +474,8 @@ pub fn text() -> String {
         let uptime_s = embassy_time::Instant::now().as_ticks() / embassy_time::TICK_HZ;
         let _ = write!(
             out,
-            " temp={:.2}C/{:.2}F target={:.1}C/{:.1}F sensor={} pid={:.1}% relay={} led=({}, {}, {}) uptime={}s heap_free={}B",
+            " probe={} temp={:.2}C/{:.2}F target={:.1}C/{:.1}F sensor={} pid={:.1}% relay={} led=({}, {}, {}) uptime={}s heap_free={}B",
+            probe_name,
             temp_c,
             temp_f,
             target_c,
@@ -507,6 +513,7 @@ pub fn prometheus() -> String {
     let ntp_source_code = snapshot.ntp_source_code;
     let ntp_uptime_at_sync = snapshot.ntp_uptime_at_sync;
     let master_ip = snapshot.master_ip;
+    let probe_name = snapshot.probe_name;
 
     let ntp_source = shared::NtpSource::from_u8(ntp_source_code);
 
@@ -632,6 +639,11 @@ pub fn prometheus() -> String {
         "brewster_sensor_temperature_valid {}",
         if has_temp { 1 } else { 0 }
     );
+
+    out.push_str("# HELP brewster_sensor_info Sensor metadata including configured probe name.\n");
+    out.push_str("# TYPE brewster_sensor_info gauge\n");
+    let _ = writeln!(out, "brewster_sensor_info{{name=\"{}\"}} 1", probe_name);
+
     let temp_cf_opt = if has_temp {
         let temp_c = temp_centi as f32 / 100.0;
         let temp_f = temp_c * 9.0 / 5.0 + 32.0;
@@ -651,7 +663,9 @@ pub fn prometheus() -> String {
         }
     }
 
-    out.push_str("# HELP brewster_sensor_temperature_fahrenheit Sensor temperature in Fahrenheit.\n");
+    out.push_str(
+        "# HELP brewster_sensor_temperature_fahrenheit Sensor temperature in Fahrenheit.\n",
+    );
     out.push_str("# TYPE brewster_sensor_temperature_fahrenheit gauge\n");
     match temp_cf_opt {
         Some((_, temp_f)) => {
@@ -725,11 +739,17 @@ pub fn prometheus() -> String {
     out.push_str("# TYPE brewster_pid_on_steps gauge\n");
     let _ = writeln!(out, "brewster_pid_on_steps {}", pid_on_steps);
 
-    out.push_str("# HELP brewster_relay_on 1 when heater relay is on.\n# TYPE brewster_relay_on gauge\n");
+    out.push_str(
+        "# HELP brewster_relay_on 1 when heater relay is on.\n# TYPE brewster_relay_on gauge\n",
+    );
     let _ = writeln!(out, "brewster_relay_on {}", if relay_on { 1 } else { 0 });
 
     out.push_str("# HELP brewster_ntp_synced 1 when NTP time is currently synchronized.\n# TYPE brewster_ntp_synced gauge\n");
-    let _ = writeln!(out, "brewster_ntp_synced {}", if ntp_synced { 1 } else { 0 });
+    let _ = writeln!(
+        out,
+        "brewster_ntp_synced {}",
+        if ntp_synced { 1 } else { 0 }
+    );
 
     out.push_str("# HELP brewster_ntp_sync_total Number of successful NTP sync events.\n");
     out.push_str("# TYPE brewster_ntp_sync_total counter\n");
@@ -891,24 +911,12 @@ pub fn prometheus() -> String {
         let _ = writeln!(
             out,
             "brewster_ntp_peer_success_total{{source=\"{}\",address=\"{}.{}.{}.{}\",selected=\"{}\"}} {}",
-            source_label,
-            a,
-            b,
-            c,
-            d,
-            selected_str,
-            peer.success_count
+            source_label, a, b, c, d, selected_str, peer.success_count
         );
         let _ = writeln!(
             out,
             "brewster_ntp_peer_fail_total{{source=\"{}\",address=\"{}.{}.{}.{}\",selected=\"{}\"}} {}",
-            source_label,
-            a,
-            b,
-            c,
-            d,
-            selected_str,
-            peer.fail_count
+            source_label, a, b, c, d, selected_str, peer.fail_count
         );
         if peer.has_sample {
             let _ = writeln!(
@@ -925,13 +933,7 @@ pub fn prometheus() -> String {
             let _ = writeln!(
                 out,
                 "brewster_ntp_peer_last_sync_uptime_seconds{{source=\"{}\",address=\"{}.{}.{}.{}\",selected=\"{}\"}} {}",
-                source_label,
-                a,
-                b,
-                c,
-                d,
-                selected_str,
-                peer.last_sync_uptime_s
+                source_label, a, b, c, d, selected_str, peer.last_sync_uptime_s
             );
         }
         if peer.has_sample {

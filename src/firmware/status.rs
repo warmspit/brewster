@@ -62,6 +62,7 @@ pub fn sensor_status_label(code: u8) -> &'static str {
 const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
 const TARGET_TEMP_MIN_CENTI: i32 = 0;
 const TARGET_TEMP_MAX_CENTI: i32 = 15_000;
+pub const TEMP_PROBE_NAME_MAX_LEN: usize = 32;
 const TARGET_STORE_MAGIC: [u8; 4] = *b"BRWT";
 const TARGET_STORE_VERSION: u8 = 1;
 const TARGET_STORE_SIZE: usize = 9;
@@ -117,6 +118,8 @@ static NTP_PEERS: Mutex<RefCell<[Option<NtpPeerState>; NTP_MAX_TRACKED_PEERS]>> 
 static TARGET_TEMP_CENTI: AtomicI32 = AtomicI32::new(2111);
 static TARGET_STORE_OFFSET: AtomicU32 = AtomicU32::new(0);
 static TARGET_STORE_PARTITION_LEN: AtomicU32 = AtomicU32::new(0);
+static TEMP_PROBE_NAME: Mutex<RefCell<heapless::String<TEMP_PROBE_NAME_MAX_LEN>>> =
+    Mutex::new(RefCell::new(heapless::String::new()));
 static FLASH_STORAGE: Mutex<RefCell<Option<FlashStorage<'static>>>> =
     Mutex::new(RefCell::new(None));
 static PARTITION_TABLE_BUFFER: ConstStaticCell<[u8; PARTITION_TABLE_MAX_LEN]> =
@@ -301,6 +304,7 @@ pub struct MetricsSnapshot {
     pub ntp_uptime_at_sync: u32,
     pub current_ntp_time: Option<u32>,
     pub master_ip: [u8; 4],
+    pub probe_name: heapless::String<TEMP_PROBE_NAME_MAX_LEN>,
 }
 
 pub struct PrometheusSnapshot {
@@ -316,6 +320,54 @@ pub struct PrometheusSnapshot {
     pub ntp_source_code: u8,
     pub ntp_uptime_at_sync: u32,
     pub master_ip: [u8; 4],
+    pub probe_name: heapless::String<TEMP_PROBE_NAME_MAX_LEN>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ProbeNameError {
+    Empty,
+    TooLong,
+    InvalidChar,
+}
+
+fn is_valid_probe_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.')
+}
+
+pub fn set_temp_probe_name(name: &str) -> Result<(), ProbeNameError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ProbeNameError::Empty);
+    }
+    if trimmed.len() > TEMP_PROBE_NAME_MAX_LEN {
+        return Err(ProbeNameError::TooLong);
+    }
+    if !trimmed.chars().all(is_valid_probe_name_char) {
+        return Err(ProbeNameError::InvalidChar);
+    }
+
+    let mut normalized = heapless::String::<TEMP_PROBE_NAME_MAX_LEN>::new();
+    normalized
+        .push_str(trimmed)
+        .map_err(|_| ProbeNameError::TooLong)?;
+
+    critical_section::with(|cs| {
+        *TEMP_PROBE_NAME.borrow_ref_mut(cs) = normalized;
+    });
+    Ok(())
+}
+
+pub fn temp_probe_name() -> heapless::String<TEMP_PROBE_NAME_MAX_LEN> {
+    critical_section::with(|cs| {
+        let current = TEMP_PROBE_NAME.borrow_ref(cs);
+        if current.is_empty() {
+            let mut fallback = heapless::String::new();
+            let _ = fallback.push_str("probe-1");
+            fallback
+        } else {
+            current.clone()
+        }
+    })
 }
 
 fn clear_ntp_peers_by_source(source: shared::NtpSource) {
@@ -414,6 +466,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
     };
     let current_ntp_time = current_unix_time();
     let master_ip = NTP_SERVER_IP.load(Ordering::Relaxed).to_be_bytes();
+    let probe_name = temp_probe_name();
 
     MetricsSnapshot {
         temp_centi,
@@ -436,6 +489,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
         ntp_uptime_at_sync,
         current_ntp_time,
         master_ip,
+        probe_name,
     }
 }
 
@@ -457,6 +511,7 @@ pub fn prometheus_snapshot() -> PrometheusSnapshot {
         (sync_ticks / embassy_time::TICK_HZ) as u32
     };
     let master_ip = NTP_SERVER_IP.load(Ordering::Relaxed).to_be_bytes();
+    let probe_name = temp_probe_name();
 
     PrometheusSnapshot {
         temp_centi,
@@ -471,6 +526,7 @@ pub fn prometheus_snapshot() -> PrometheusSnapshot {
         ntp_source_code,
         ntp_uptime_at_sync,
         master_ip,
+        probe_name,
     }
 }
 
