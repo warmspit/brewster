@@ -15,6 +15,7 @@ mod wifi;
 use embassy_executor::Spawner;
 use embassy_net::DhcpConfig;
 use embassy_net::Ipv4Address;
+use embassy_net::Ipv6Address;
 use embassy_net::StackResources;
 use embassy_net::udp::PacketMetadata;
 use esp_hal::peripherals::WIFI;
@@ -27,6 +28,7 @@ use super::shared;
 const HTTP_PORT: u16 = 80;
 const MDNS_PORT: u16 = 5353;
 const MDNS_MULTICAST: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
+const MDNS_MULTICAST_V6: Ipv6Address = Ipv6Address::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
 
 static HTTP_RX_BUFFER: ConstStaticCell<[u8; 1024]> = ConstStaticCell::new([0; 1024]);
 static HTTP_TX_BUFFER: ConstStaticCell<[u8; 1024]> = ConstStaticCell::new([0; 1024]);
