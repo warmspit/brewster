@@ -213,49 +213,104 @@ fn build_mdns_response(
     Some((i, question))
 }
 
-fn build_mdns_announcement(hostname: &[u8], ip: [u8; 4], out: &mut [u8]) -> Option<usize> {
-    let total_len = 12 + hostname.len() + 18;
-    if out.len() < total_len {
+fn append_bytes(out: &mut [u8], index: &mut usize, bytes: &[u8]) -> Option<()> {
+    if *index + bytes.len() > out.len() {
         return None;
     }
+    out[*index..*index + bytes.len()].copy_from_slice(bytes);
+    *index += bytes.len();
+    Some(())
+}
 
-    // Unsolicited mDNS answer packet.
-    out[0] = 0x00;
-    out[1] = 0x00;
-    out[2] = 0x84;
-    out[3] = 0x00;
-    out[4] = 0x00;
-    out[5] = 0x00;
-    out[6] = 0x00;
-    out[7] = 0x01;
-    out[8] = 0x00;
-    out[9] = 0x00;
-    out[10] = 0x00;
-    out[11] = 0x00;
+fn append_u16(out: &mut [u8], index: &mut usize, value: u16) -> Option<()> {
+    append_bytes(out, index, &value.to_be_bytes())
+}
 
-    let mut i = 12usize;
-    out[i] = hostname.len() as u8;
-    i += 1;
-    out[i..i + hostname.len()].copy_from_slice(hostname);
-    i += hostname.len();
-    out[i] = 5;
-    i += 1;
-    out[i..i + 5].copy_from_slice(b"local");
-    i += 5;
-    out[i] = 0;
-    i += 1;
+fn append_u32(out: &mut [u8], index: &mut usize, value: u32) -> Option<()> {
+    append_bytes(out, index, &value.to_be_bytes())
+}
 
-    // TYPE=A, CLASS=IN | cache-flush, TTL, RDLENGTH=4, RDATA=IPv4.
-    out[i..i + 2].copy_from_slice(&1u16.to_be_bytes());
-    i += 2;
-    out[i..i + 2].copy_from_slice(&0x8001u16.to_be_bytes());
-    i += 2;
-    out[i..i + 4].copy_from_slice(&MDNS_TTL_SECS.to_be_bytes());
-    i += 4;
-    out[i..i + 2].copy_from_slice(&4u16.to_be_bytes());
-    i += 2;
-    out[i..i + 4].copy_from_slice(&ip);
-    i += 4;
+fn append_dns_name(out: &mut [u8], index: &mut usize, labels: &[&[u8]]) -> Option<()> {
+    for label in labels {
+        if label.len() > 63 {
+            return None;
+        }
+        append_bytes(out, index, &[label.len() as u8])?;
+        append_bytes(out, index, label)?;
+    }
+    append_bytes(out, index, &[0])
+}
+
+fn build_mdns_announcement(hostname: &[u8], ip: [u8; 4], out: &mut [u8]) -> Option<usize> {
+    let mut i = 0usize;
+
+    // Unsolicited mDNS answer packet with service and host records.
+    append_u16(out, &mut i, 0x0000)?; // transaction id
+    append_u16(out, &mut i, 0x8400)?; // response + authoritative
+    append_u16(out, &mut i, 0x0000)?; // qdcount
+    append_u16(out, &mut i, 0x0005)?; // ancount
+    append_u16(out, &mut i, 0x0000)?; // nscount
+    append_u16(out, &mut i, 0x0000)?; // arcount
+
+    let services_labels: [&[u8]; 4] = [b"_services", b"_dns-sd", b"_udp", b"local"];
+    let http_service_labels: [&[u8]; 3] = [b"_http", b"_tcp", b"local"];
+    let http_instance_labels: [&[u8]; 4] = [hostname, b"_http", b"_tcp", b"local"];
+    let host_labels: [&[u8]; 2] = [hostname, b"local"];
+
+    // PTR _services._dns-sd._udp.local -> _http._tcp.local
+    append_dns_name(out, &mut i, &services_labels)?;
+    append_u16(out, &mut i, 12)?; // PTR
+    append_u16(out, &mut i, 0x0001)?; // IN
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    let rdlen_pos = i;
+    append_u16(out, &mut i, 0)?;
+    let rdata_start = i;
+    append_dns_name(out, &mut i, &http_service_labels)?;
+    let rdata_len = (i - rdata_start) as u16;
+    out[rdlen_pos..rdlen_pos + 2].copy_from_slice(&rdata_len.to_be_bytes());
+
+    // PTR _http._tcp.local -> <hostname>._http._tcp.local
+    append_dns_name(out, &mut i, &http_service_labels)?;
+    append_u16(out, &mut i, 12)?; // PTR
+    append_u16(out, &mut i, 0x0001)?; // IN
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    let rdlen_pos = i;
+    append_u16(out, &mut i, 0)?;
+    let rdata_start = i;
+    append_dns_name(out, &mut i, &http_instance_labels)?;
+    let rdata_len = (i - rdata_start) as u16;
+    out[rdlen_pos..rdlen_pos + 2].copy_from_slice(&rdata_len.to_be_bytes());
+
+    // SRV <hostname>._http._tcp.local -> <hostname>.local:80
+    append_dns_name(out, &mut i, &http_instance_labels)?;
+    append_u16(out, &mut i, 33)?; // SRV
+    append_u16(out, &mut i, 0x8001)?; // IN, cache-flush
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    let rdlen_pos = i;
+    append_u16(out, &mut i, 0)?;
+    let rdata_start = i;
+    append_u16(out, &mut i, 0)?; // priority
+    append_u16(out, &mut i, 0)?; // weight
+    append_u16(out, &mut i, super::HTTP_PORT)?; // port
+    append_dns_name(out, &mut i, &host_labels)?; // target host
+    let rdata_len = (i - rdata_start) as u16;
+    out[rdlen_pos..rdlen_pos + 2].copy_from_slice(&rdata_len.to_be_bytes());
+
+    // TXT <hostname>._http._tcp.local (empty TXT payload)
+    append_dns_name(out, &mut i, &http_instance_labels)?;
+    append_u16(out, &mut i, 16)?; // TXT
+    append_u16(out, &mut i, 0x8001)?; // IN, cache-flush
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    append_u16(out, &mut i, 1)?;
+    append_bytes(out, &mut i, &[0x00])?;
+
+    // A <hostname>.local -> IPv4
+    append_dns_name(out, &mut i, &host_labels)?;
+    append_u16(out, &mut i, 1)?; // A
+    append_u16(out, &mut i, 0x8001)?; // IN, cache-flush
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    append_u16(out, &mut i, 4)?;
+    append_bytes(out, &mut i, &ip)?;
 
     Some(i)
 }
