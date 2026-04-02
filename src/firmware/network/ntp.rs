@@ -18,10 +18,6 @@ const NTP_RETRY_SECS: u64 = 60;
 const NTP_TIMEOUT_SECS: u64 = 5;
 const NTP_MIN_POLL_SECS: u64 = 60;
 const NTP_POLL_RAMP_DURATION_SECS: u64 = 3_600;
-const NTP_IBURST_PROBES: u16 = 500;
-const NTP_IBURST_INTERVAL_SECS: u64 = 1;
-const NTP_REBURST_PROBES: u16 = 4;
-const NTP_REBURST_AFTER_FAILURES: u8 = 3;
 const NTP_UNIX_OFFSET: u32 = 2_208_988_800;
 const NTP_SERVERS_CONFIG: Option<&str> = option_env!("NTP_SERVERS");
 const NTP_SERVER_CONFIG: Option<&str> = option_env!("NTP_SERVER");
@@ -181,9 +177,7 @@ pub async fn ntp_sync_task(stack: Stack<'static>) {
     let tx_meta = NTP_TX_META.take();
     let rx_buffer = NTP_RX_BUFFER.take();
     let tx_buffer = NTP_TX_BUFFER.take();
-    let mut iburst_remaining = NTP_IBURST_PROBES;
     let mut first_sync_uptime_s: Option<u64> = None;
-    let mut had_successful_sync = false;
     let mut consecutive_failures = 0u8;
 
     loop {
@@ -310,7 +304,6 @@ pub async fn ntp_sync_task(stack: Stack<'static>) {
                 match best {
                     Some((sample, master_ip, source)) => {
                         consecutive_failures = 0;
-                        had_successful_sync = true;
                         crate::firmware::status::update_ntp_time(
                             sample.unix,
                             sample.unix_frac_us,
@@ -328,62 +321,24 @@ pub async fn ntp_sync_task(stack: Stack<'static>) {
                             sample.latency_ms
                         );
 
-                        if iburst_remaining > 0 {
-                            let completed = NTP_IBURST_PROBES.saturating_sub(iburst_remaining) + 1;
-                            iburst_remaining = iburst_remaining.saturating_sub(1);
-                            println!(
-                                "ntp: iburst sample {}/{}; next poll in {}s (remaining={})",
-                                completed,
-                                NTP_IBURST_PROBES,
-                                NTP_IBURST_INTERVAL_SECS,
-                                iburst_remaining
-                            );
-                            NTP_IBURST_INTERVAL_SECS
-                        } else {
-                            let uptime_s = Instant::now().as_ticks() / embassy_time::TICK_HZ;
-                            let baseline = *first_sync_uptime_s.get_or_insert(uptime_s);
-                            let age_since_sync_s = uptime_s.saturating_sub(baseline);
-                            let next_poll_secs =
-                                ntp_poll_interval_secs_after_sync(age_since_sync_s);
-                            println!(
-                                "ntp: adaptive poll in {}s (age_since_sync={}s)",
-                                next_poll_secs, age_since_sync_s
-                            );
-                            next_poll_secs
-                        }
+                        let uptime_s = Instant::now().as_ticks() / embassy_time::TICK_HZ;
+                        let baseline = *first_sync_uptime_s.get_or_insert(uptime_s);
+                        let age_since_sync_s = uptime_s.saturating_sub(baseline);
+                        let next_poll_secs = ntp_poll_interval_secs_after_sync(age_since_sync_s);
+                        println!(
+                            "ntp: adaptive poll in {}s (age_since_sync={}s)",
+                            next_poll_secs, age_since_sync_s
+                        );
+                        next_poll_secs
                     }
                     None => {
                         consecutive_failures = consecutive_failures.saturating_add(1);
 
-                        if iburst_remaining > 0 {
-                            let completed = NTP_IBURST_PROBES.saturating_sub(iburst_remaining) + 1;
-                            iburst_remaining = iburst_remaining.saturating_sub(1);
-                            println!(
-                                "ntp: iburst miss {}/{}; retry in {}s (remaining={})",
-                                completed,
-                                NTP_IBURST_PROBES,
-                                NTP_IBURST_INTERVAL_SECS,
-                                iburst_remaining
-                            );
-                            NTP_IBURST_INTERVAL_SECS
-                        } else if had_successful_sync
-                            && consecutive_failures >= NTP_REBURST_AFTER_FAILURES
-                        {
-                            iburst_remaining = NTP_REBURST_PROBES;
-                            first_sync_uptime_s = None;
-                            had_successful_sync = false;
-                            println!(
-                                "ntp: sync degraded ({} consecutive failures); entering re-burst ({} probes every {}s)",
-                                consecutive_failures, NTP_REBURST_PROBES, NTP_IBURST_INTERVAL_SECS
-                            );
-                            NTP_IBURST_INTERVAL_SECS
-                        } else {
-                            println!(
-                                "ntp: retry in {}s (consecutive_failures={})",
-                                NTP_RETRY_SECS, consecutive_failures
-                            );
-                            NTP_RETRY_SECS
-                        }
+                        println!(
+                            "ntp: retry in {}s (consecutive_failures={})",
+                            NTP_RETRY_SECS, consecutive_failures
+                        );
+                        NTP_RETRY_SECS
                     }
                 }
             }
