@@ -89,6 +89,14 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 min-width: 0;
             }
 
+            .top-row {
+                display: flex;
+                gap: 14px;
+            }
+            .top-row > .card {
+                flex: 1;
+                min-width: 0;
+            }
             .span-3 { grid-column: span 3; }
             .span-4 { grid-column: span 4; }
             .span-6 { grid-column: span 6; }
@@ -110,9 +118,10 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
             }
 
             #ip {
-                font-size: clamp(1.05rem, 2.2vw, 1.6rem);
+                font-size: clamp(0.8rem, 1.4vw, 1.05rem);
                 overflow-wrap: anywhere;
-                word-break: break-word;
+                word-break: keep-all;
+                white-space: nowrap;
             }
 
             .kpi-sub {
@@ -226,7 +235,9 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
             }
 
             @media (max-width: 980px) {
-                .span-3,
+                .top-row {
+                    flex-direction: column;
+                }
                 .span-4,
                 .span-6,
                 .span-8 {
@@ -243,13 +254,14 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
             </header>
 
             <section class="grid">
-                <article class="card span-3">
+                <div class="top-row span-12">
+                <article class="card">
                     <div class="kpi-title">Temperature</div>
                     <div class="kpi-value" id="temp">--.- C</div>
                     <div class="kpi-sub" id="temp-secondary">--.- F</div>
                 </article>
 
-                <article class="card span-3">
+                <article class="card">
                     <div class="kpi-title">Target</div>
                     <div class="kpi-value" id="target">--.- C</div>
                     <div class="kpi-sub" id="target-secondary">--.- F</div>
@@ -262,24 +274,13 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                     </div>
                 </article>
 
-                <article class="card span-3">
+                <article class="card">
                     <div class="kpi-title">PID Output</div>
                     <div class="kpi-value" id="pid">--.-%</div>
                     <div class="kpi-sub" id="relay">Relay --</div>
                 </article>
 
-                <article class="card span-3">
-                    <div class="kpi-title">Network</div>
-                    <div class="kpi-value" id="ip">--</div>
-                    <div class="kpi-sub"><span id="ntp-pill" class="status-pill status-warn">NTP pending</span></div>
-                </article>
-
-                <article class="card span-8">
-                    <div class="kpi-title">Temperature Trend (live)</div>
-                    <canvas id="temp-chart" class="chart" width="780" height="172"></canvas>
-                </article>
-
-                <article class="card span-4">
+                <article class="card">
                     <div class="kpi-title">Sensor + Loop</div>
                     <div class="rows">
                         <div class="row"><span>Probe</span><strong id="probe">--</strong></div>
@@ -288,6 +289,18 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                         <div class="row"><span>On steps</span><strong id="on-steps">--</strong></div>
                         <div class="row"><span>Uptime</span><strong id="uptime">--</strong></div>
                     </div>
+                </article>
+
+                <article class="card">
+                    <div class="kpi-title">Network</div>
+                    <div class="kpi-value" id="ip">--</div>
+                    <div class="kpi-sub"><span id="ntp-pill" class="status-pill status-warn">NTP pending</span></div>
+                </article>
+                </div>
+
+                <article class="card span-12">
+                    <div class="kpi-title">Temperature Trend (live)</div>
+                    <canvas id="temp-chart" class="chart" width="780" height="172"></canvas>
                 </article>
 
                 <article class="card span-12">
@@ -503,14 +516,16 @@ async fn socket_write_http_response(
     socket: &mut TcpSocket<'_>,
     status_line: &str,
     content_type: &str,
+    cache_control: &str,
     body: &str,
 ) -> Result<(), TcpError> {
-    let mut header = alloc::string::String::with_capacity(96);
+    let mut header = alloc::string::String::with_capacity(128);
     let _ = write!(
         header,
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nCache-Control: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status_line,
         content_type,
+        cache_control,
         body.len(),
     );
     socket_write_all(socket, header.as_bytes()).await?;
@@ -575,12 +590,13 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
             }
         };
 
-        let (status_line, content_type, body) = match parsed {
+        let (status_line, content_type, cache_control, body) = match parsed {
             ParsedRequest::GetDashboard => {
                 println!("http: serving dashboard to {:?}", remote);
                 (
                     "200 OK",
                     "text/html; charset=utf-8",
+                    "no-store",
                     ResponseBody::Owned(dashboard_html()),
                 )
             }
@@ -589,6 +605,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                 (
                     "200 OK",
                     "application/javascript; charset=utf-8",
+                    "no-store",
                     ResponseBody::Static(DASHBOARD_JS),
                 )
             }
@@ -597,6 +614,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                 (
                     "200 OK",
                     "application/json",
+                    "no-store",
                     ResponseBody::Owned(metrics::json()),
                 )
             }
@@ -605,6 +623,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                 (
                     "200 OK",
                     "text/plain; version=0.0.4; charset=utf-8",
+                    "no-store",
                     ResponseBody::Owned(metrics::prometheus()),
                 )
             }
@@ -613,6 +632,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                     (
                         "400 Bad Request",
                         "application/json",
+                        "no-store",
                         ResponseBody::Static("{\n  \"error\": \"out_of_range\"\n}\n"),
                     )
                 } else {
@@ -625,6 +645,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                             (
                                 "200 OK",
                                 "application/json",
+                                "no-store",
                                 ResponseBody::Owned(temperature_ok_json(temp)),
                             )
                         }
@@ -636,6 +657,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                             (
                                 "500 Internal Server Error",
                                 "application/json",
+                                "no-store",
                                 ResponseBody::Static("{\n  \"error\": \"persist_failed\"\n}\n"),
                             )
                         }
@@ -648,22 +670,26 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                     (
                         "200 OK",
                         "application/json",
+                        "no-store",
                         ResponseBody::Owned(probe_name_ok_json(&status::temp_probe_name())),
                     )
                 }
                 Err(status::ProbeNameError::Empty) => (
                     "400 Bad Request",
                     "application/json",
+                    "no-store",
                     ResponseBody::Static("{\n  \"error\": \"empty_probe_name\"\n}\n"),
                 ),
                 Err(status::ProbeNameError::TooLong) => (
                     "400 Bad Request",
                     "application/json",
+                    "no-store",
                     ResponseBody::Static("{\n  \"error\": \"probe_name_too_long\"\n}\n"),
                 ),
                 Err(status::ProbeNameError::InvalidChar) => (
                     "400 Bad Request",
                     "application/json",
+                    "no-store",
                     ResponseBody::Static(
                         "{\n  \"error\": \"invalid_probe_name\", \"allowed\": \"[A-Za-z0-9 ._-]\"\n}\n",
                     ),
@@ -672,6 +698,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
             ParsedRequest::BadRequest => (
                 "400 Bad Request",
                 "application/json",
+                "no-store",
                 ResponseBody::Static("{\n  \"error\": \"bad_request\"\n}\n"),
             ),
             ParsedRequest::NotFound => {
@@ -679,6 +706,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                 (
                     "404 Not Found",
                     "application/json",
+                    "no-store",
                     ResponseBody::Static("{\n  \"error\": \"not_found\"\n}\n"),
                 )
             }
@@ -688,8 +716,14 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
             status::http_exchange_mark_error();
         }
 
-        if let Err(error) =
-            socket_write_http_response(&mut socket, status_line, content_type, body.as_str()).await
+        if let Err(error) = socket_write_http_response(
+            &mut socket,
+            status_line,
+            content_type,
+            cache_control,
+            body.as_str(),
+        )
+        .await
         {
             println!("http: write failed to {:?}: {:?}", remote, error);
             status::http_exchange_mark_error();

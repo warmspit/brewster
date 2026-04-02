@@ -68,9 +68,26 @@ type PidSample = {
 class Sparkline {
   private readonly canvas: HTMLCanvasElement;
   private readonly values: number[] = [];
+  private hoverX: number | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
+    this.canvas.addEventListener("mousemove", (event: MouseEvent) => {
+      this.updateHover(event.clientX);
+    });
+    this.canvas.addEventListener("mouseleave", () => {
+      this.hoverX = null;
+      this.draw();
+    });
+  }
+
+  private updateHover(clientX: number): void {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * this.canvas.width;
+    if (this.hoverX !== x) {
+      this.hoverX = x;
+      this.draw();
+    }
   }
 
   push(value: number): void {
@@ -163,15 +180,72 @@ class Sparkline {
     });
 
     ctx.stroke();
+
+    if (this.hoverX !== null && this.values.length > 0) {
+      const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this.hoverX));
+      const ratio = (clampedX - axisPadLeft) / plotWidth;
+      const index = Math.round(ratio * (this.values.length - 1));
+      const value = this.values[index];
+      const x = clampedX;
+      const y = yFor(value);
+      const tip = `${value.toFixed(2)} C  T+${formatElapsed(index * TREND_SAMPLE_INTERVAL_SECONDS)}`;
+
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, plotPadTop);
+      ctx.lineTo(x, height - plotPadBottom);
+      ctx.stroke();
+
+      ctx.fillStyle = "#40d990";
+      ctx.beginPath();
+      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+      const paddingX = 8;
+      const tipWidth = ctx.measureText(tip).width + paddingX * 2;
+      const tipHeight = 20;
+      let tipX = x + 10;
+      if (tipX + tipWidth > width - 4) {
+        tipX = x - tipWidth - 10;
+      }
+      const tipY = Math.max(4, y - 26);
+      ctx.fillStyle = "rgba(6, 12, 20, 0.92)";
+      ctx.fillRect(tipX, tipY, tipWidth, tipHeight);
+      ctx.strokeStyle = "rgba(130, 184, 235, 0.35)";
+      ctx.strokeRect(tipX, tipY, tipWidth, tipHeight);
+      ctx.fillStyle = "rgba(230, 241, 255, 0.96)";
+      ctx.fillText(tip, tipX + paddingX, tipY + 14);
+      ctx.restore();
+    }
   }
 }
 
 class PidChart {
   private readonly canvas: HTMLCanvasElement;
   private readonly values: PidSample[] = [];
+  private hoverX: number | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
+    this.canvas.addEventListener("mousemove", (event: MouseEvent) => {
+      this.updateHover(event.clientX);
+    });
+    this.canvas.addEventListener("mouseleave", () => {
+      this.hoverX = null;
+      this.draw();
+    });
+  }
+
+  private updateHover(clientX: number): void {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * this.canvas.width;
+    if (this.hoverX !== x) {
+      this.hoverX = x;
+      this.draw();
+    }
   }
 
   push(sample: PidSample): void {
@@ -271,6 +345,44 @@ class PidChart {
       });
       ctx.stroke();
     });
+
+    if (this.hoverX !== null && this.values.length > 0) {
+      const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this.hoverX));
+      const ratio = (clampedX - axisPadLeft) / plotWidth;
+      const i = Math.round(ratio * (this.values.length - 1));
+      const sample = this.values[i];
+      const x = clampedX;
+      const tip1 = `T+${formatElapsed(i * TREND_SAMPLE_INTERVAL_SECONDS)}`;
+      const tip2 = `t:${sample.target_c.toFixed(1)} kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
+      const tip3 = `out:${sample.output_percent.toFixed(1)} win:${sample.window_step} on:${sample.on_steps} r:${sample.relay_on}`;
+
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, plotPadTop);
+      ctx.lineTo(x, height - plotPadBottom);
+      ctx.stroke();
+
+      ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+      const paddingX = 8;
+      const tipWidth = Math.max(ctx.measureText(tip1).width, ctx.measureText(tip2).width, ctx.measureText(tip3).width) + paddingX * 2;
+      const tipHeight = 52;
+      let tipX = x + 10;
+      if (tipX + tipWidth > width - 4) {
+        tipX = x - tipWidth - 10;
+      }
+      const tipY = 10;
+      ctx.fillStyle = "rgba(6, 12, 20, 0.92)";
+      ctx.fillRect(tipX, tipY, tipWidth, tipHeight);
+      ctx.strokeStyle = "rgba(130, 184, 235, 0.35)";
+      ctx.strokeRect(tipX, tipY, tipWidth, tipHeight);
+      ctx.fillStyle = "rgba(230, 241, 255, 0.96)";
+      ctx.fillText(tip1, tipX + paddingX, tipY + 14);
+      ctx.fillText(tip2, tipX + paddingX, tipY + 28);
+      ctx.fillText(tip3, tipX + paddingX, tipY + 42);
+      ctx.restore();
+    }
   }
 }
 
