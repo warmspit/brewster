@@ -6,8 +6,8 @@ use esp_hal::delay::Delay;
 use esp_hal::gpio::{Flex, Level, Output};
 use pid::Pid;
 
-use super::{config, sensor, status};
 use super::error::SensorError;
+use super::{config, sensor, status};
 
 #[derive(Clone, Copy)]
 pub struct Rgb8 {

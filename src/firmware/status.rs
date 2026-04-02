@@ -1050,7 +1050,8 @@ pub fn http_led_state() -> HttpLedState {
         HttpLedState::ActiveOk
     } else {
         let now_ticks = embassy_time::Instant::now().as_ticks();
-        let active_until = critical_section::with(|cs| HTTP_LED_ACTIVE_UNTIL_TICKS.borrow(cs).get());
+        let active_until =
+            critical_section::with(|cs| HTTP_LED_ACTIVE_UNTIL_TICKS.borrow(cs).get());
         if now_ticks < active_until {
             HttpLedState::ActiveOk
         } else {
