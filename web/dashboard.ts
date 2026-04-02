@@ -3,6 +3,9 @@ export {};
 type NullableNumber = number | null;
 
 const TREND_SAMPLE_INTERVAL_SECONDS = 2;
+const STORAGE_KEY_TEMP = "brewster_temp_v1";
+const STORAGE_KEY_PID = "brewster_pid_v1";
+const STORAGE_KEY_UPTIME = "brewster_uptime_v1";
 
 const formatElapsed = (totalSeconds: number): string => {
   const h = Math.floor(totalSeconds / 3600);
@@ -79,6 +82,26 @@ class Sparkline {
       this.hoverX = null;
       this.draw();
     });
+    this.loadFromStorage();
+    this.draw();
+  }
+
+  private loadFromStorage(): void {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_TEMP);
+      if (raw) {
+        const parsed: unknown = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.values.push(...(parsed as number[]));
+        }
+      }
+    } catch {}
+  }
+
+  private saveToStorage(): void {
+    try {
+      localStorage.setItem(STORAGE_KEY_TEMP, JSON.stringify(this.values));
+    } catch {}
   }
 
   private updateHover(clientX: number): void {
@@ -92,11 +115,13 @@ class Sparkline {
 
   push(value: number): void {
     this.values.push(value);
+    this.saveToStorage();
     this.draw();
   }
 
   clear(): void {
     this.values.length = 0;
+    try { localStorage.removeItem(STORAGE_KEY_TEMP); } catch {}
     this.draw();
   }
 
@@ -237,6 +262,26 @@ class PidChart {
       this.hoverX = null;
       this.draw();
     });
+    this.loadFromStorage();
+    this.draw();
+  }
+
+  private loadFromStorage(): void {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_PID);
+      if (raw) {
+        const parsed: unknown = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.values.push(...(parsed as PidSample[]));
+        }
+      }
+    } catch {}
+  }
+
+  private saveToStorage(): void {
+    try {
+      localStorage.setItem(STORAGE_KEY_PID, JSON.stringify(this.values));
+    } catch {}
   }
 
   private updateHover(clientX: number): void {
@@ -250,11 +295,13 @@ class PidChart {
 
   push(sample: PidSample): void {
     this.values.push(sample);
+    this.saveToStorage();
     this.draw();
   }
 
   clear(): void {
     this.values.length = 0;
+    try { localStorage.removeItem(STORAGE_KEY_PID); } catch {}
     this.draw();
   }
 
@@ -415,7 +462,14 @@ const formatUptime = (uptimeSec: number): string => {
   return `${h}h ${m}m ${s}s`;
 };
 
-let lastUptimeSeconds: number | null = null;
+let lastUptimeSeconds: number | null = (() => {
+  try {
+    const v = localStorage.getItem(STORAGE_KEY_UPTIME);
+    return v !== null ? Number(v) : null;
+  } catch {
+    return null;
+  }
+})();
 
 const setTargetFeedback = (text: string, tone: "normal" | "ok" | "error" = "normal"): void => {
   const feedback = byId<HTMLElement>("target-feedback");
@@ -455,11 +509,8 @@ const updateNtpPill = (synced: boolean): void => {
 };
 
 const updateFromStatus = (data: StatusPayload, sparkline: Sparkline, pidChart: PidChart): void => {
-  if (lastUptimeSeconds !== null && data.system.uptime_s < lastUptimeSeconds) {
-    sparkline.clear();
-    pidChart.clear();
-  }
   lastUptimeSeconds = data.system.uptime_s;
+  try { localStorage.setItem(STORAGE_KEY_UPTIME, String(lastUptimeSeconds)); } catch {}
 
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
   setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
@@ -564,6 +615,34 @@ const start = (): void => {
   window.setInterval(() => {
     void loop(sparkline, pidChart);
   }, 2000);
+
+  const menuBtn = byId<HTMLButtonElement>("menu-btn");
+  const menuDropdown = byId<HTMLElement>("menu-dropdown");
+  const clearDataBtn = byId<HTMLButtonElement>("clear-data");
+
+  menuBtn.addEventListener("click", (event: MouseEvent) => {
+    event.stopPropagation();
+    const isOpen = menuDropdown.classList.toggle("open");
+    menuBtn.setAttribute("aria-expanded", String(isOpen));
+  });
+
+  menuDropdown.addEventListener("click", (event: MouseEvent) => {
+    event.stopPropagation();
+  });
+
+  document.addEventListener("click", () => {
+    menuDropdown.classList.remove("open");
+    menuBtn.setAttribute("aria-expanded", "false");
+  });
+
+  clearDataBtn.addEventListener("click", () => {
+    sparkline.clear();
+    pidChart.clear();
+    try { localStorage.removeItem(STORAGE_KEY_UPTIME); } catch {}
+    lastUptimeSeconds = null;
+    menuDropdown.classList.remove("open");
+    menuBtn.setAttribute("aria-expanded", "false");
+  });
 };
 
 start();

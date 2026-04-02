@@ -73,6 +73,83 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 font-size: 0.95rem;
             }
 
+            .menu-wrap {
+                position: relative;
+                margin-left: auto;
+                align-self: center;
+            }
+
+            .menu-btn {
+                background: #0b1624;
+                border: 1px solid rgba(130, 184, 235, 0.3);
+                border-radius: 8px;
+                color: var(--muted);
+                cursor: pointer;
+                font-size: 1.3rem;
+                line-height: 1;
+                padding: 5px 11px;
+            }
+
+            .menu-btn:hover {
+                color: var(--text);
+                border-color: rgba(130, 184, 235, 0.6);
+            }
+
+            .menu-dropdown {
+                display: none;
+                position: absolute;
+                right: 0;
+                top: calc(100% + 8px);
+                background: #0b1624;
+                border: 1px solid var(--panel-border);
+                border-radius: 12px;
+                box-shadow: var(--card-shadow);
+                min-width: 200px;
+                padding: 6px 0;
+                z-index: 100;
+            }
+
+            .menu-dropdown.open {
+                display: block;
+            }
+
+            .menu-item {
+                background: none;
+                border: none;
+                color: var(--text);
+                cursor: pointer;
+                display: block;
+                font-size: 0.95rem;
+                padding: 10px 18px;
+                text-align: left;
+                width: 100%;
+            }
+
+            .menu-item:hover {
+                background: rgba(130, 184, 235, 0.08);
+            }
+
+            .menu-item.danger {
+                color: #ff6e6e;
+            }
+
+            .menu-section {
+                padding: 10px 12px;
+                border-bottom: 1px solid rgba(130, 184, 235, 0.16);
+            }
+
+            .menu-section .kpi-sub {
+                margin-top: 0;
+                margin-bottom: 8px;
+                font-size: 0.78rem;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+            }
+
+            .menu-section .target-control {
+                margin-top: 0;
+            }
+
             .grid {
                 display: grid;
                 grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -251,6 +328,22 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
             <header class="headline">
                 <h1 id="title">__HOSTNAME__ CONTROL PANEL</h1>
                 <div class="meta" id="updated">Waiting for data...</div>
+                <div class="menu-wrap">
+                    <button class="menu-btn" id="menu-btn" aria-label="Menu" aria-expanded="false">&#9776;</button>
+                    <div class="menu-dropdown" id="menu-dropdown" role="menu">
+                        <div class="menu-section">
+                            <div class="kpi-sub">Set Target Temperature</div>
+                            <div class="target-control">
+                                <div class="target-input-row">
+                                    <input id="target-input" class="target-input" type="number" min="25" max="150" step="0.1" placeholder="Set target C" />
+                                    <button id="target-submit" class="target-button" type="button">Apply</button>
+                                </div>
+                                <div class="kpi-sub" id="target-feedback"></div>
+                            </div>
+                        </div>
+                        <button class="menu-item danger" id="clear-data" role="menuitem">Clear all saved data</button>
+                    </div>
+                </div>
             </header>
 
             <section class="grid">
@@ -265,13 +358,6 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                     <div class="kpi-title">Target</div>
                     <div class="kpi-value" id="target">--.- C</div>
                     <div class="kpi-sub" id="target-secondary">--.- F</div>
-                    <div class="target-control">
-                        <div class="target-input-row">
-                            <input id="target-input" class="target-input" type="number" min="25" max="150" step="0.1" placeholder="Set target C" />
-                            <button id="target-submit" class="target-button" type="button">Apply</button>
-                        </div>
-                        <div class="kpi-sub" id="target-feedback"></div>
-                    </div>
                 </article>
 
                 <article class="card">
