@@ -121,6 +121,49 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 font-size: 0.9rem;
             }
 
+            .target-control {
+                margin-top: 10px;
+                display: grid;
+                gap: 8px;
+            }
+
+            .target-input-row {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+            }
+
+            .target-input {
+                width: 100%;
+                min-width: 0;
+                background: rgba(6, 12, 20, 0.8);
+                border: 1px solid rgba(130, 184, 235, 0.22);
+                border-radius: 10px;
+                color: var(--text);
+                padding: 8px 10px;
+                font-size: 0.95rem;
+            }
+
+            .target-button {
+                background: linear-gradient(135deg, #40c4ff, #2fa8e0);
+                border: 0;
+                color: #04121f;
+                border-radius: 10px;
+                padding: 8px 12px;
+                font-weight: 700;
+                cursor: pointer;
+                white-space: nowrap;
+            }
+
+            .target-button:disabled {
+                opacity: 0.6;
+                cursor: default;
+            }
+
+            #target-feedback {
+                min-height: 1.1em;
+            }
+
             .status-pill {
                 display: inline-block;
                 padding: 4px 10px;
@@ -188,6 +231,13 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                     <div class="kpi-title">Target</div>
                     <div class="kpi-value" id="target">--.- C</div>
                     <div class="kpi-sub" id="target-secondary">--.- F</div>
+                    <div class="target-control">
+                        <div class="target-input-row">
+                            <input id="target-input" class="target-input" type="number" min="0" max="150" step="0.1" placeholder="Set target C" />
+                            <button id="target-submit" class="target-button" type="button">Apply</button>
+                        </div>
+                        <div class="kpi-sub" id="target-feedback"></div>
+                    </div>
                 </article>
 
                 <article class="card span-3">

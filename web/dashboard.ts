@@ -168,6 +168,32 @@ const persistTrend = (values: number[]): void => {
   }
 };
 
+const setTargetFeedback = (text: string, tone: "normal" | "ok" | "error" = "normal"): void => {
+  const feedback = byId<HTMLElement>("target-feedback");
+  feedback.textContent = text;
+  if (tone === "ok") {
+    feedback.style.color = "#40d990";
+  } else if (tone === "error") {
+    feedback.style.color = "#ff6e6e";
+  } else {
+    feedback.style.color = "";
+  }
+};
+
+const submitTargetTemperature = async (tempC: number): Promise<void> => {
+  const response = await fetch("/temperature", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ temperature_c: tempC }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+};
+
 const updateNtpPill = (synced: boolean): void => {
   const pill = byId<HTMLElement>("ntp-pill");
   if (synced) {
@@ -193,6 +219,10 @@ const updateFromStatus = (data: StatusPayload, sparkline: Sparkline): void => {
 
   setText("target", `${data.pid.target_c.toFixed(1)} C`);
   setText("target-secondary", `${data.pid.target_f.toFixed(1)} F`);
+  const targetInput = byId<HTMLInputElement>("target-input");
+  if (document.activeElement !== targetInput) {
+    targetInput.value = data.pid.target_c.toFixed(1);
+  }
 
   setText("pid", `${data.pid.output_percent.toFixed(1)}%`);
   setText("relay", data.pid.relay_on ? "Relay ON" : "Relay OFF");
@@ -239,6 +269,42 @@ const start = (): void => {
   const chart = byId<HTMLCanvasElement>("temp-chart");
   const sparkline = new Sparkline(chart);
   sparkline.replaceValues(loadPersistedTrend());
+  const targetInput = byId<HTMLInputElement>("target-input");
+  const targetSubmit = byId<HTMLButtonElement>("target-submit");
+
+  const applyTarget = async (): Promise<void> => {
+    const parsed = Number.parseFloat(targetInput.value);
+    if (!Number.isFinite(parsed)) {
+      setTargetFeedback("Enter a valid number", "error");
+      return;
+    }
+    if (parsed < 0 || parsed > 150) {
+      setTargetFeedback("Target must be between 0 and 150 C", "error");
+      return;
+    }
+
+    targetSubmit.disabled = true;
+    setTargetFeedback("Applying target...");
+    try {
+      await submitTargetTemperature(parsed);
+      setTargetFeedback(`Applied ${parsed.toFixed(1)} C`, "ok");
+      await loop(sparkline);
+    } catch (error) {
+      setTargetFeedback(`Apply failed: ${String(error)}`, "error");
+    } finally {
+      targetSubmit.disabled = false;
+    }
+  };
+
+  targetSubmit.addEventListener("click", () => {
+    void applyTarget();
+  });
+  targetInput.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void applyTarget();
+    }
+  });
 
   void loop(sparkline);
   window.setInterval(() => {
