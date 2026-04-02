@@ -66,8 +66,8 @@ pub fn runtime_error_active() -> bool {
 }
 
 const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
-const TARGET_TEMP_MIN_CENTI: i32 = 2_500;
-const TARGET_TEMP_MAX_CENTI: i32 = 15_000;
+const TARGET_TEMP_MIN_CENTI: i32 = -2_000;
+const TARGET_TEMP_MAX_CENTI: i32 = 2_500;
 pub const TEMP_PROBE_NAME_MAX_LEN: usize = 32;
 const TARGET_STORE_MAGIC: [u8; 4] = *b"BRWT";
 const TARGET_STORE_VERSION: u8 = 1;

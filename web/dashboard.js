@@ -568,8 +568,8 @@ const start = () => {
       setTargetFeedback("Enter a valid number", "error");
       return;
     }
-    if (parsed < 25 || parsed > 150) {
-      setTargetFeedback("Target must be between 25 and 150 C", "error");
+    if (parsed < -20 || parsed > 25) {
+      setTargetFeedback("Target must be between -20 and 25 C", "error");
       return;
     }
 
