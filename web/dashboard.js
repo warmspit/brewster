@@ -60,6 +60,25 @@ class Sparkline {
     this.draw();
   }
 
+  setHoverRatio(ratio) {
+    if (ratio === null) {
+      if (this.hoverX !== null) {
+        this.hoverX = null;
+        this.draw();
+      }
+      return;
+    }
+
+    const axisPadLeft = 46;
+    const plotWidth = Math.max(1, this.canvas.width - axisPadLeft - 6);
+    const clampedRatio = Math.max(0, Math.min(1, ratio));
+    const x = axisPadLeft + clampedRatio * plotWidth;
+    if (this.hoverX !== x) {
+      this.hoverX = x;
+      this.draw();
+    }
+  }
+
   updateHover(clientX) {
     const rect = this.canvas.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * this.canvas.width;
@@ -226,6 +245,25 @@ class PidChart {
   setElapsedSeconds(seconds) {
     this.elapsedSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : null;
     this.draw();
+  }
+
+  setHoverRatio(ratio) {
+    if (ratio === null) {
+      if (this.hoverX !== null) {
+        this.hoverX = null;
+        this.draw();
+      }
+      return;
+    }
+
+    const axisPadLeft = 46;
+    const plotWidth = Math.max(1, this.canvas.width - axisPadLeft - 6);
+    const clampedRatio = Math.max(0, Math.min(1, ratio));
+    const x = axisPadLeft + clampedRatio * plotWidth;
+    if (this.hoverX !== x) {
+      this.hoverX = x;
+      this.draw();
+    }
   }
 
   updateHover(clientX) {
@@ -631,6 +669,27 @@ const start = () => {
   const pidCanvas = byId("pid-chart");
   const sparkline = new Sparkline(chart);
   const pidChart = new PidChart(pidCanvas);
+  const hoverRatioForClientX = (canvas, clientX) => {
+    const rect = canvas.getBoundingClientRect();
+    const canvasX = ((clientX - rect.left) / rect.width) * canvas.width;
+    const axisPadLeft = 46;
+    const plotWidth = Math.max(1, canvas.width - axisPadLeft - 6);
+    return Math.max(0, Math.min(1, (canvasX - axisPadLeft) / plotWidth));
+  };
+
+  chart.addEventListener("mousemove", (event) => {
+    pidChart.setHoverRatio(hoverRatioForClientX(chart, event.clientX));
+  });
+  chart.addEventListener("mouseleave", () => {
+    pidChart.setHoverRatio(null);
+  });
+  pidCanvas.addEventListener("mousemove", (event) => {
+    sparkline.setHoverRatio(hoverRatioForClientX(pidCanvas, event.clientX));
+  });
+  pidCanvas.addEventListener("mouseleave", () => {
+    sparkline.setHoverRatio(null);
+  });
+
   const targetInput = byId("target-input");
   const targetSubmit = byId("target-submit");
 

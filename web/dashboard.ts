@@ -121,6 +121,25 @@ class Sparkline {
     this.draw();
   }
 
+  setHoverRatio(ratio: number | null): void {
+    if (ratio === null) {
+      if (this.hoverX !== null) {
+        this.hoverX = null;
+        this.draw();
+      }
+      return;
+    }
+
+    const axisPadLeft = 46;
+    const plotWidth = Math.max(1, this.canvas.width - axisPadLeft - 6);
+    const clampedRatio = Math.max(0, Math.min(1, ratio));
+    const x = axisPadLeft + clampedRatio * plotWidth;
+    if (this.hoverX !== x) {
+      this.hoverX = x;
+      this.draw();
+    }
+  }
+
   private updateHover(clientX: number): void {
     const rect = this.canvas.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * this.canvas.width;
@@ -292,6 +311,25 @@ class PidChart {
   setElapsedSeconds(seconds: number): void {
     this.elapsedSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : null;
     this.draw();
+  }
+
+  setHoverRatio(ratio: number | null): void {
+    if (ratio === null) {
+      if (this.hoverX !== null) {
+        this.hoverX = null;
+        this.draw();
+      }
+      return;
+    }
+
+    const axisPadLeft = 46;
+    const plotWidth = Math.max(1, this.canvas.width - axisPadLeft - 6);
+    const clampedRatio = Math.max(0, Math.min(1, ratio));
+    const x = axisPadLeft + clampedRatio * plotWidth;
+    if (this.hoverX !== x) {
+      this.hoverX = x;
+      this.draw();
+    }
   }
 
   private updateHover(clientX: number): void {
@@ -697,6 +735,27 @@ const start = (): void => {
   const pidCanvas = byId<HTMLCanvasElement>("pid-chart");
   const sparkline = new Sparkline(chart);
   const pidChart = new PidChart(pidCanvas);
+  const hoverRatioForClientX = (canvas: HTMLCanvasElement, clientX: number): number => {
+    const rect = canvas.getBoundingClientRect();
+    const canvasX = ((clientX - rect.left) / rect.width) * canvas.width;
+    const axisPadLeft = 46;
+    const plotWidth = Math.max(1, canvas.width - axisPadLeft - 6);
+    return Math.max(0, Math.min(1, (canvasX - axisPadLeft) / plotWidth));
+  };
+
+  chart.addEventListener("mousemove", (event: MouseEvent) => {
+    pidChart.setHoverRatio(hoverRatioForClientX(chart, event.clientX));
+  });
+  chart.addEventListener("mouseleave", () => {
+    pidChart.setHoverRatio(null);
+  });
+  pidCanvas.addEventListener("mousemove", (event: MouseEvent) => {
+    sparkline.setHoverRatio(hoverRatioForClientX(pidCanvas, event.clientX));
+  });
+  pidCanvas.addEventListener("mouseleave", () => {
+    sparkline.setHoverRatio(null);
+  });
+
   const targetInput = byId<HTMLInputElement>("target-input");
   const targetSubmit = byId<HTMLButtonElement>("target-submit");
 
