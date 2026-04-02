@@ -208,7 +208,7 @@ class Sparkline {
       const value = this.values[index];
       const x = clampedX;
       const y = yFor(value);
-      const tip = `${value.toFixed(2)} C  T+${formatElapsed(index * TREND_SAMPLE_INTERVAL_SECONDS)}`;
+      const tip = `${value.toFixed(2)} C  T+${formatElapsed(Math.round(ratio * elapsedSeconds))}`;
 
       ctx.save();
       ctx.strokeStyle = "rgba(255,255,255,0.35)";
@@ -384,7 +384,7 @@ class PidChart {
       const i = Math.round(ratio * (this.values.length - 1));
       const sample = this.values[i];
       const x = clampedX;
-      const tip1 = `T+${formatElapsed(i * TREND_SAMPLE_INTERVAL_SECONDS)}`;
+      const tip1 = `T+${formatElapsed(Math.round(ratio * elapsedSeconds))}`;
       const tip2 = `t:${sample.target_c.toFixed(1)} kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
       const tip3 = `out:${sample.output_percent.toFixed(1)} win:${sample.window_step} on:${sample.on_steps} r:${sample.relay_on}`;
 
