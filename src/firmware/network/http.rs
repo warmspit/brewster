@@ -185,6 +185,28 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 border: 1px solid rgba(130, 184, 235, 0.14);
             }
 
+            .legend {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px 12px;
+                margin-top: 10px;
+                color: var(--muted);
+                font-size: 0.82rem;
+            }
+
+            .legend-item {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+            }
+
+            .legend-dot {
+                width: 10px;
+                height: 10px;
+                border-radius: 999px;
+                display: inline-block;
+            }
+
             .rows {
                 display: grid;
                 gap: 10px;
@@ -265,6 +287,21 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                         <div class="row"><span>Window step</span><strong id="window-step">--</strong></div>
                         <div class="row"><span>On steps</span><strong id="on-steps">--</strong></div>
                         <div class="row"><span>Uptime</span><strong id="uptime">--</strong></div>
+                    </div>
+                </article>
+
+                <article class="card span-12">
+                    <div class="kpi-title">PID Trend (all parameters)</div>
+                    <canvas id="pid-chart" class="chart" width="1120" height="172"></canvas>
+                    <div class="legend">
+                        <span class="legend-item"><span class="legend-dot" style="background:#f7d774"></span>target_c</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#6ec5ff"></span>kp</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#8ef0c8"></span>ki</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#b28cff"></span>kd</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#ff8d6e"></span>output_pct</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#7cf3ff"></span>window_step</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#ffb3d1"></span>on_steps</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#ffffff"></span>relay_on</span>
                     </div>
                 </article>
 

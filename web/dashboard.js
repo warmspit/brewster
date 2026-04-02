@@ -117,6 +117,107 @@ class Sparkline {
   }
 }
 
+class PidChart {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.values = [];
+  }
+
+  push(sample) {
+    this.values.push(sample);
+    this.draw();
+  }
+
+  draw() {
+    const ctx = this.canvas.getContext("2d");
+    if (!ctx) return;
+
+    const { width, height } = this.canvas;
+    ctx.clearRect(0, 0, width, height);
+
+    if (this.values.length < 2) return;
+
+    const axisPadLeft = 46;
+    const plotPadTop = 8;
+    const plotPadBottom = 8;
+    const plotWidth = Math.max(1, width - axisPadLeft - 6);
+    const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
+
+    const series = [
+      { color: "#f7d774", value: (p) => p.target_c },
+      { color: "#6ec5ff", value: (p) => p.kp },
+      { color: "#8ef0c8", value: (p) => p.ki },
+      { color: "#b28cff", value: (p) => p.kd },
+      { color: "#ff8d6e", value: (p) => p.output_percent },
+      { color: "#7cf3ff", value: (p) => p.window_step },
+      { color: "#ffb3d1", value: (p) => p.on_steps },
+      { color: "#ffffff", value: (p) => p.relay_on },
+    ];
+
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    this.values.forEach((point) => {
+      series.forEach((entry) => {
+        const v = entry.value(point);
+        if (v < min) min = v;
+        if (v > max) max = v;
+      });
+    });
+    const spread = Math.max(0.1, max - min);
+    const xStep = plotWidth / (this.values.length - 1);
+    const yFor = (v) => {
+      const norm = (v - min) / spread;
+      return height - plotPadBottom - norm * plotHeight;
+    };
+
+    const axisColor = "rgba(159, 180, 203, 0.35)";
+    ctx.strokeStyle = axisColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(axisPadLeft, plotPadTop);
+    ctx.lineTo(axisPadLeft, height - plotPadBottom);
+    ctx.stroke();
+
+    const tickValues = [max, min + spread / 2, min];
+    ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+    ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
+    tickValues.forEach((tickValue) => {
+      const y = yFor(tickValue);
+      ctx.beginPath();
+      ctx.moveTo(axisPadLeft, y);
+      ctx.lineTo(width - 4, y);
+      ctx.stroke();
+      ctx.fillText(tickValue.toFixed(1), 2, y + 4);
+    });
+
+    ctx.beginPath();
+    ctx.moveTo(axisPadLeft, height - plotPadBottom);
+    ctx.lineTo(width - 4, height - plotPadBottom);
+    ctx.stroke();
+    const elapsedSeconds = (this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS;
+    ctx.save();
+    ctx.textAlign = "right";
+    ctx.fillText(`T+${formatElapsed(elapsedSeconds)}`, width - 4, height - 2);
+    ctx.restore();
+
+    series.forEach((entry, idx) => {
+      ctx.beginPath();
+      ctx.lineWidth = idx === series.length - 1 ? 1.2 : 1.8;
+      ctx.strokeStyle = entry.color;
+      this.values.forEach((point, i) => {
+        const x = axisPadLeft + i * xStep;
+        const y = yFor(entry.value(point));
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+    });
+  }
+}
+
 const byId = (id) => {
   const el = document.getElementById(id);
   if (!el) {
@@ -208,7 +309,7 @@ const updateNtpPill = (synced) => {
   }
 };
 
-const updateFromStatus = (data, sparkline) => {
+const updateFromStatus = (data, sparkline, pidChart) => {
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
   setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
 
@@ -229,6 +330,16 @@ const updateFromStatus = (data, sparkline) => {
 
   setText("pid", `${data.pid.output_percent.toFixed(1)}%`);
   setText("relay", data.pid.relay_on ? "Relay ON" : "Relay OFF");
+  pidChart.push({
+    target_c: data.pid.target_c,
+    kp: data.pid.kp,
+    ki: data.pid.ki,
+    kd: data.pid.kd,
+    output_percent: data.pid.output_percent,
+    window_step: data.pid.window_step,
+    on_steps: data.pid.on_steps,
+    relay_on: data.pid.relay_on ? 1 : 0,
+  });
 
   setText("ip", data.system.ip || "--");
   updateNtpPill(data.system.ntp.synced);
@@ -252,14 +363,14 @@ const updateFromStatus = (data, sparkline) => {
   setText("ntp-time", data.system.ntp.time ?? "--");
 };
 
-const loop = async (sparkline) => {
+const loop = async (sparkline, pidChart) => {
   try {
     const response = await fetch("/status", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
     const payload = await response.json();
-    updateFromStatus(payload, sparkline);
+    updateFromStatus(payload, sparkline, pidChart);
   } catch (error) {
     setText("updated", `Update failed: ${String(error)}`);
     const pill = byId("ntp-pill");
@@ -270,7 +381,9 @@ const loop = async (sparkline) => {
 
 const start = () => {
   const chart = byId("temp-chart");
+  const pidCanvas = byId("pid-chart");
   const sparkline = new Sparkline(chart);
+  const pidChart = new PidChart(pidCanvas);
   sparkline.replaceValues(loadPersistedTrend());
   const targetInput = byId("target-input");
   const targetSubmit = byId("target-submit");
@@ -291,7 +404,7 @@ const start = () => {
     try {
       await submitTargetTemperature(parsed);
       setTargetFeedback(`Applied ${parsed.toFixed(1)} C`, "ok");
-      await loop(sparkline);
+      await loop(sparkline, pidChart);
     } catch (error) {
       setTargetFeedback(`Apply failed: ${String(error)}`, "error");
     } finally {
@@ -309,9 +422,9 @@ const start = () => {
     }
   });
 
-  void loop(sparkline);
+  void loop(sparkline, pidChart);
   window.setInterval(() => {
-    void loop(sparkline);
+    void loop(sparkline, pidChart);
   }, 2000);
 };
 
