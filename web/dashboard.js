@@ -350,17 +350,6 @@ const updateFromStatus = (data, sparkline, pidChart) => {
   setText("on-steps", String(data.pid.on_steps));
   setText("uptime", formatUptime(data.system.uptime_s));
 
-  setText("ntp-source", data.system.ntp.master_source ?? "--");
-  setText("ntp-address", data.system.ntp.master_address ?? "--");
-  setText(
-    "ntp-offset",
-    `${formatNumber(data.system.ntp.master_offset_ms, " ms")} / ${formatNumber(data.system.ntp.master_offset_jitter_ms, " ms")}`,
-  );
-  setText(
-    "ntp-latency",
-    `${formatNumber(data.system.ntp.master_latency_ms, " ms")} / ${formatNumber(data.system.ntp.master_jitter_ms, " ms")}`,
-  );
-  setText("ntp-time", data.system.ntp.time ?? "--");
 };
 
 const loop = async (sparkline, pidChart) => {

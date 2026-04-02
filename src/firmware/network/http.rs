@@ -305,16 +305,6 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                     </div>
                 </article>
 
-                <article class="card span-12">
-                    <div class="kpi-title">NTP Master</div>
-                    <div class="rows">
-                        <div class="row"><span>Source</span><strong id="ntp-source">--</strong></div>
-                        <div class="row"><span>Address</span><strong id="ntp-address">--</strong></div>
-                        <div class="row"><span>Offset / Jitter</span><strong id="ntp-offset">--</strong></div>
-                        <div class="row"><span>Latency</span><strong id="ntp-latency">--</strong></div>
-                        <div class="row"><span>Last Time</span><strong id="ntp-time">--</strong></div>
-                    </div>
-                </article>
             </section>
         </main>
 
