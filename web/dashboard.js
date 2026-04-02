@@ -35,12 +35,39 @@ class Sparkline {
     const min = Math.min(...this.values);
     const max = Math.max(...this.values);
     const spread = Math.max(0.1, max - min);
-    const xStep = width / (this.values.length - 1);
+    const axisPadLeft = 46;
+    const plotPadTop = 8;
+    const plotPadBottom = 8;
+    const plotWidth = Math.max(1, width - axisPadLeft - 6);
+    const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
+    const xStep = this.values.length > 1 ? plotWidth / (this.values.length - 1) : 0;
 
     const yFor = (v) => {
       const norm = (v - min) / spread;
-      return height - 8 - norm * (height - 16);
+      return height - plotPadBottom - norm * plotHeight;
     };
+
+    const axisColor = "rgba(159, 180, 203, 0.35)";
+    ctx.strokeStyle = axisColor;
+    ctx.lineWidth = 1;
+
+    ctx.beginPath();
+    ctx.moveTo(axisPadLeft, plotPadTop);
+    ctx.lineTo(axisPadLeft, height - plotPadBottom);
+    ctx.stroke();
+
+    const tickValues = [max, min + spread / 2, min];
+    ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+    ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
+    tickValues.forEach((tickValue) => {
+      const y = yFor(tickValue);
+      ctx.strokeStyle = axisColor;
+      ctx.beginPath();
+      ctx.moveTo(axisPadLeft, y);
+      ctx.lineTo(width - 4, y);
+      ctx.stroke();
+      ctx.fillText(`${tickValue.toFixed(1)} C`, 2, y + 4);
+    });
 
     const gradient = ctx.createLinearGradient(0, 0, width, 0);
     gradient.addColorStop(0, "#40c4ff");
@@ -51,7 +78,7 @@ class Sparkline {
     ctx.beginPath();
 
     this.values.forEach((v, i) => {
-      const x = i * xStep;
+      const x = axisPadLeft + i * xStep;
       const y = yFor(v);
       if (i === 0) {
         ctx.moveTo(x, y);
