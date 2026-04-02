@@ -116,12 +116,18 @@ The HTTP server listens on port `80`.
 Supported routes:
 
 - `GET /`
+- `GET /dashboard.js`
 - `GET /status`
 - `GET /metrics`
 - `POST /temperature`
 - `POST /probe-name`
 
-`GET /` and `GET /status` return the same JSON status document.
+`GET /` serves the built-in Grafana-style dashboard UI.
+
+The dashboard polls `GET /status` for live data and visualizes temperature, PID output,
+relay state, system health, and NTP master stats.
+
+`GET /status` returns the raw JSON status document used by the dashboard.
 
 Example:
 
@@ -324,6 +330,8 @@ src/firmware/sensor.rs    DS18B20 one-wire implementation
 src/firmware/network.rs   Wi-Fi, mDNS, HTTP, and NTP tasks
 src/firmware/status.rs    Shared runtime state, JSON/text status, persistence
 src/firmware/shared.rs    Shared utility functions
+web/dashboard.ts          Dashboard source (TypeScript)
+web/dashboard.js          Dashboard runtime script served by firmware
 build.rs                  Build-time env injection and linker diagnostics
 ```
 

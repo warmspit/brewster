@@ -10,6 +10,239 @@ use esp_println::println;
 
 use crate::firmware::{metrics, status};
 
+const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Brewster Dashboard</title>
+        <style>
+            :root {
+                --bg-1: #09101b;
+                --bg-2: #13253d;
+                --panel: rgba(9, 20, 32, 0.74);
+                --panel-border: rgba(130, 184, 235, 0.24);
+                --text: #e6f1ff;
+                --muted: #9fb4cb;
+                --accent: #40c4ff;
+                --ok: #40d990;
+                --warn: #ffb74d;
+                --danger: #ff6e6e;
+                --card-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                margin: 0;
+                min-height: 100vh;
+                font-family: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+                color: var(--text);
+                background:
+                    radial-gradient(circle at 20% 10%, rgba(64, 196, 255, 0.22), transparent 45%),
+                    radial-gradient(circle at 85% 80%, rgba(64, 217, 144, 0.16), transparent 52%),
+                    linear-gradient(145deg, var(--bg-1), var(--bg-2));
+                padding: 24px;
+            }
+
+            .dashboard {
+                max-width: 1180px;
+                margin: 0 auto;
+                display: grid;
+                gap: 16px;
+            }
+
+            .headline {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                gap: 12px;
+            }
+
+            .headline h1 {
+                margin: 0;
+                font-size: clamp(1.35rem, 3vw, 2.1rem);
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+            }
+
+            .headline .meta {
+                color: var(--muted);
+                font-size: 0.95rem;
+            }
+
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(12, minmax(0, 1fr));
+                gap: 14px;
+            }
+
+            .card {
+                background: var(--panel);
+                border: 1px solid var(--panel-border);
+                border-radius: 16px;
+                box-shadow: var(--card-shadow);
+                backdrop-filter: blur(8px);
+                padding: 16px;
+                min-width: 0;
+            }
+
+            .span-3 { grid-column: span 3; }
+            .span-4 { grid-column: span 4; }
+            .span-6 { grid-column: span 6; }
+            .span-8 { grid-column: span 8; }
+            .span-12 { grid-column: span 12; }
+
+            .kpi-title {
+                color: var(--muted);
+                font-size: 0.85rem;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+            }
+
+            .kpi-value {
+                margin-top: 6px;
+                font-size: clamp(1.5rem, 3vw, 2.4rem);
+                font-weight: 700;
+                line-height: 1.1;
+            }
+
+            #ip {
+                font-size: clamp(1.05rem, 2.2vw, 1.6rem);
+                overflow-wrap: anywhere;
+                word-break: break-word;
+            }
+
+            .kpi-sub {
+                margin-top: 8px;
+                color: var(--muted);
+                font-size: 0.9rem;
+            }
+
+            .status-pill {
+                display: inline-block;
+                padding: 4px 10px;
+                border-radius: 999px;
+                font-size: 0.8rem;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+            }
+
+            .status-ok { background: rgba(64, 217, 144, 0.18); color: var(--ok); }
+            .status-warn { background: rgba(255, 183, 77, 0.18); color: var(--warn); }
+            .status-danger { background: rgba(255, 110, 110, 0.16); color: var(--danger); }
+
+            .chart {
+                width: 100%;
+                height: 172px;
+                border-radius: 10px;
+                background: rgba(8, 15, 25, 0.72);
+                border: 1px solid rgba(130, 184, 235, 0.14);
+            }
+
+            .rows {
+                display: grid;
+                gap: 10px;
+            }
+
+            .row {
+                display: flex;
+                justify-content: space-between;
+                gap: 12px;
+                color: var(--muted);
+                font-size: 0.92rem;
+            }
+
+            .row strong {
+                color: var(--text);
+                font-weight: 600;
+            }
+
+            @media (max-width: 980px) {
+                .span-3,
+                .span-4,
+                .span-6,
+                .span-8 {
+                    grid-column: span 12;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <main class="dashboard">
+            <header class="headline">
+                <h1 id="title">__HOSTNAME__ CONTROL PANEL</h1>
+                <div class="meta" id="updated">Waiting for data...</div>
+            </header>
+
+            <section class="grid">
+                <article class="card span-3">
+                    <div class="kpi-title">Temperature</div>
+                    <div class="kpi-value" id="temp">--.- C</div>
+                    <div class="kpi-sub" id="temp-secondary">--.- F</div>
+                </article>
+
+                <article class="card span-3">
+                    <div class="kpi-title">Target</div>
+                    <div class="kpi-value" id="target">--.- C</div>
+                    <div class="kpi-sub" id="target-secondary">--.- F</div>
+                </article>
+
+                <article class="card span-3">
+                    <div class="kpi-title">PID Output</div>
+                    <div class="kpi-value" id="pid">--.-%</div>
+                    <div class="kpi-sub" id="relay">Relay --</div>
+                </article>
+
+                <article class="card span-3">
+                    <div class="kpi-title">Network</div>
+                    <div class="kpi-value" id="ip">--</div>
+                    <div class="kpi-sub"><span id="ntp-pill" class="status-pill status-warn">NTP pending</span></div>
+                </article>
+
+                <article class="card span-8">
+                    <div class="kpi-title">Temperature Trend (live)</div>
+                    <canvas id="temp-chart" class="chart" width="780" height="172"></canvas>
+                </article>
+
+                <article class="card span-4">
+                    <div class="kpi-title">Sensor + Loop</div>
+                    <div class="rows">
+                        <div class="row"><span>Probe</span><strong id="probe">--</strong></div>
+                        <div class="row"><span>Sensor status</span><strong id="sensor-status">--</strong></div>
+                        <div class="row"><span>Window step</span><strong id="window-step">--</strong></div>
+                        <div class="row"><span>On steps</span><strong id="on-steps">--</strong></div>
+                        <div class="row"><span>Uptime</span><strong id="uptime">--</strong></div>
+                    </div>
+                </article>
+
+                <article class="card span-12">
+                    <div class="kpi-title">NTP Master</div>
+                    <div class="rows">
+                        <div class="row"><span>Source</span><strong id="ntp-source">--</strong></div>
+                        <div class="row"><span>Address</span><strong id="ntp-address">--</strong></div>
+                        <div class="row"><span>Offset / Jitter</span><strong id="ntp-offset">--</strong></div>
+                        <div class="row"><span>Latency</span><strong id="ntp-latency">--</strong></div>
+                        <div class="row"><span>Last Time</span><strong id="ntp-time">--</strong></div>
+                    </div>
+                </article>
+            </section>
+        </main>
+
+        <script type="module" src="/dashboard.js"></script>
+    </body>
+</html>
+"#;
+
+const DASHBOARD_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/dashboard.js"));
+
+fn dashboard_html() -> alloc::string::String {
+    let hostname = crate::device_hostname().to_ascii_uppercase();
+    DASHBOARD_HTML_TEMPLATE.replace("__HOSTNAME__", &hostname)
+}
+
 enum ResponseBody {
     Static(&'static str),
     Owned(alloc::string::String),
@@ -91,6 +324,8 @@ fn parse_probe_name(buf: &[u8]) -> Option<alloc::string::String> {
 
 #[derive(Clone)]
 enum ParsedRequest {
+    GetDashboard,
+    GetDashboardScript,
     GetStatus,
     GetMetrics,
     PostTemperature(f32),
@@ -100,8 +335,25 @@ enum ParsedRequest {
 }
 
 fn parse_request(buf: &[u8]) -> ParsedRequest {
-    if buf.starts_with(b"GET / ")
-        || buf.starts_with(b"GET /status ")
+    if buf.starts_with(b"GET /dashboard.js ")
+        || buf.starts_with(b"GET /dashboard.js?")
+        || buf.starts_with(b"GET /dashboard.js\r")
+    {
+        return ParsedRequest::GetDashboardScript;
+    }
+
+    if buf.starts_with(b"GET /panel ")
+        || buf.starts_with(b"GET /panel?")
+        || buf.starts_with(b"GET /panel\r")
+    {
+        return ParsedRequest::GetDashboard;
+    }
+
+    if buf.starts_with(b"GET / ") || buf.starts_with(b"GET /?") || buf.starts_with(b"GET /\r") {
+        return ParsedRequest::GetDashboard;
+    }
+
+    if buf.starts_with(b"GET /status ")
         || buf.starts_with(b"GET /status?")
         || buf.starts_with(b"GET /status\r")
     {
@@ -247,6 +499,22 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
         };
 
         let (status_line, content_type, body) = match parsed {
+            ParsedRequest::GetDashboard => {
+                println!("http: serving dashboard to {:?}", remote);
+                (
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    ResponseBody::Owned(dashboard_html()),
+                )
+            }
+            ParsedRequest::GetDashboardScript => {
+                println!("http: serving dashboard script to {:?}", remote);
+                (
+                    "200 OK",
+                    "application/javascript; charset=utf-8",
+                    ResponseBody::Static(DASHBOARD_JS),
+                )
+            }
             ParsedRequest::GetStatus => {
                 println!("http: serving status to {:?}", remote);
                 (
