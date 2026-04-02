@@ -1,4 +1,18 @@
 const TREND_STORAGE_KEY = "brewster.dashboard.tempTrend.v1";
+const TREND_SAMPLE_INTERVAL_SECONDS = 2;
+
+const formatElapsed = (totalSeconds) => {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  if (h > 0) {
+    return `${h}h ${m}m`;
+  }
+  if (m > 0) {
+    return `${m}m ${s}s`;
+  }
+  return `${s}s`;
+};
 
 class Sparkline {
   constructor(canvas) {
@@ -68,6 +82,18 @@ class Sparkline {
       ctx.stroke();
       ctx.fillText(`${tickValue.toFixed(1)} C`, 2, y + 4);
     });
+
+    ctx.beginPath();
+    ctx.moveTo(axisPadLeft, height - plotPadBottom);
+    ctx.lineTo(width - 4, height - plotPadBottom);
+    ctx.stroke();
+    const elapsedSeconds = (this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS;
+    ctx.save();
+    ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+    ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
+    ctx.textAlign = "right";
+    ctx.fillText(`T+${formatElapsed(elapsedSeconds)}`, width - 4, height - 2);
+    ctx.restore();
 
     const gradient = ctx.createLinearGradient(0, 0, width, 0);
     gradient.addColorStop(0, "#40c4ff");
