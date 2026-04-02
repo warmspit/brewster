@@ -44,24 +44,19 @@ type StatusPayload = {
 class Sparkline {
   private readonly canvas: HTMLCanvasElement;
   private readonly values: number[] = [];
-  private readonly maxPoints: number;
 
-  constructor(canvas: HTMLCanvasElement, maxPoints = 120) {
+  constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
-    this.maxPoints = maxPoints;
   }
 
   push(value: number): void {
     this.values.push(value);
-    if (this.values.length > this.maxPoints) {
-      this.values.shift();
-    }
     this.draw();
   }
 
   replaceValues(values: number[]): void {
     this.values.length = 0;
-    values.slice(-this.maxPoints).forEach((value) => {
+    values.forEach((value) => {
       this.values.push(value);
     });
     this.draw();
@@ -153,8 +148,7 @@ const loadPersistedTrend = (): number[] => {
       return [];
     }
     return parsed
-      .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
-      .slice(-240);
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   } catch {
     return [];
   }
@@ -162,7 +156,7 @@ const loadPersistedTrend = (): number[] => {
 
 const persistTrend = (values: number[]): void => {
   try {
-    window.localStorage.setItem(TREND_STORAGE_KEY, JSON.stringify(values.slice(-240)));
+    window.localStorage.setItem(TREND_STORAGE_KEY, JSON.stringify(values));
   } catch {
     // Ignore storage errors (quota, privacy mode, etc.).
   }

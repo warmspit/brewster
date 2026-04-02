@@ -1,23 +1,19 @@
 const TREND_STORAGE_KEY = "brewster.dashboard.tempTrend.v1";
 
 class Sparkline {
-  constructor(canvas, maxPoints = 120) {
+  constructor(canvas) {
     this.canvas = canvas;
     this.values = [];
-    this.maxPoints = maxPoints;
   }
 
   push(value) {
     this.values.push(value);
-    if (this.values.length > this.maxPoints) {
-      this.values.shift();
-    }
     this.draw();
   }
 
   replaceValues(values) {
     this.values.length = 0;
-    values.slice(-this.maxPoints).forEach((value) => {
+    values.forEach((value) => {
       this.values.push(value);
     });
     this.draw();
@@ -108,8 +104,7 @@ const loadPersistedTrend = () => {
       return [];
     }
     return parsed
-      .filter((value) => typeof value === "number" && Number.isFinite(value))
-      .slice(-240);
+      .filter((value) => typeof value === "number" && Number.isFinite(value));
   } catch {
     return [];
   }
@@ -117,7 +112,7 @@ const loadPersistedTrend = () => {
 
 const persistTrend = (values) => {
   try {
-    window.localStorage.setItem(TREND_STORAGE_KEY, JSON.stringify(values.slice(-240)));
+    window.localStorage.setItem(TREND_STORAGE_KEY, JSON.stringify(values));
   } catch {
     // Ignore storage errors (quota, privacy mode, etc.).
   }
