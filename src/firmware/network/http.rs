@@ -133,6 +133,15 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 color: #ff6e6e;
             }
 
+            .menu-item.success {
+                color: #40d990;
+            }
+
+            .menu-item:disabled {
+                opacity: 0.35;
+                cursor: default;
+            }
+
             .menu-section {
                 padding: 10px 12px;
                 border-bottom: 1px solid rgba(130, 184, 235, 0.16);
@@ -341,6 +350,11 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                                 <div class="kpi-sub" id="target-feedback"></div>
                             </div>
                         </div>
+                        <div class="menu-section">
+                            <div class="kpi-sub">Data Collection</div>
+                            <button class="menu-item success" id="start-data" role="menuitem">Start collection</button>
+                            <button class="menu-item" id="stop-data" role="menuitem">Stop collection</button>
+                        </div>
                         <button class="menu-item danger" id="clear-data" role="menuitem">Clear all saved data</button>
                     </div>
                 </div>
@@ -386,7 +400,7 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
 
                 <article class="card span-12">
                     <div class="kpi-title">Temperature Trend (live)</div>
-                    <canvas id="temp-chart" class="chart" width="780" height="172"></canvas>
+                    <canvas id="temp-chart" class="chart" width="1120" height="172"></canvas>
                 </article>
 
                 <article class="card span-12">
@@ -465,6 +479,21 @@ fn probe_name_ok_json(name: &str) -> alloc::string::String {
     body
 }
 
+fn collection_ok_json(enabled: bool) -> alloc::string::String {
+    let mut body = alloc::string::String::with_capacity(64);
+    let _ = write!(
+        body,
+        concat!(
+            "{{\n",
+            "  \"ok\": true,\n",
+            "  \"collecting\": {}\n",
+            "}}\n"
+        ),
+        if enabled { "true" } else { "false" }
+    );
+    body
+}
+
 fn parse_json_string_field(body: &str, key: &str) -> Option<alloc::string::String> {
     let mut pattern = alloc::string::String::with_capacity(key.len() + 2);
     pattern.push('"');
@@ -506,6 +535,7 @@ enum ParsedRequest {
     GetHistory(usize),
     GetMetrics,
     PostTemperature(f32),
+    PostCollection(bool),
     PostHistoryClear,
     PostProbeName(alloc::string::String),
     BadRequest,
@@ -617,6 +647,14 @@ fn parse_request(buf: &[u8]) -> ParsedRequest {
             Some(name) => ParsedRequest::PostProbeName(name),
             None => ParsedRequest::BadRequest,
         };
+    }
+
+    if buf.starts_with(b"POST /collection/start ") || buf.starts_with(b"POST /collection/start\r") {
+        return ParsedRequest::PostCollection(true);
+    }
+
+    if buf.starts_with(b"POST /collection/stop ") || buf.starts_with(b"POST /collection/stop\r") {
+        return ParsedRequest::PostCollection(false);
     }
 
     if buf.starts_with(b"POST /history/clear ") || buf.starts_with(b"POST /history/clear\r") {
@@ -830,6 +868,20 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                     ),
                 ),
             },
+            ParsedRequest::PostCollection(enabled) => {
+                status::set_collection_enabled(enabled);
+                if !enabled {
+                    println!("http: collection stopped from {:?}", remote);
+                } else {
+                    println!("http: collection started from {:?}", remote);
+                }
+                (
+                    "200 OK",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Owned(collection_ok_json(enabled)),
+                )
+            }
             ParsedRequest::PostHistoryClear => match status::clear_history_persistent() {
                 Ok(()) => (
                     "200 OK",

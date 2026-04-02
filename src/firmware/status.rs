@@ -119,8 +119,10 @@ static LAST_LED_GREEN: AtomicU8 = AtomicU8::new(0);
 static LAST_LED_BLUE: AtomicU8 = AtomicU8::new(0);
 static HTTP_EXCHANGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static HTTP_EXCHANGE_ERROR: AtomicBool = AtomicBool::new(false);
+static HTTP_LED_ACTIVE_UNTIL_TICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(0));
 static LAST_PID_WINDOW_STEP: AtomicU8 = AtomicU8::new(0);
 static LAST_PID_ON_STEPS: AtomicU8 = AtomicU8::new(0);
+static COLLECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 // Device IP packed as big-endian u32; use .to_be_bytes() to recover [u8; 4].
 static LAST_IP: AtomicU32 = AtomicU32::new(0);
 static LAST_IP_VALID: AtomicBool = AtomicBool::new(false);
@@ -215,6 +217,10 @@ fn history_init(storage: &mut FlashStorage<'static>, partition_offset: u32, part
 }
 
 fn persist_history_sample(sample: &RuntimeSample) {
+    if !collection_enabled() {
+        return;
+    }
+
     let now_uptime_s = (embassy_time::Instant::now().as_ticks() / embassy_time::TICK_HZ) as u32;
     let last = HISTORY_LAST_PERSIST_UPTIME_S.load(Ordering::Relaxed);
     if last != 0 && now_uptime_s.saturating_sub(last) < HISTORY_SAMPLE_INTERVAL_SECS {
@@ -435,6 +441,14 @@ pub fn get_target_temp_c() -> f32 {
     TARGET_TEMP_CENTI.load(Ordering::Relaxed) as f32 / 100.0
 }
 
+pub fn collection_enabled() -> bool {
+    COLLECTION_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_collection_enabled(enabled: bool) {
+    COLLECTION_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
 pub fn set_target_temp_c_persistent(target_c: f32) -> Result<(), PersistError> {
     let scaled = target_c * 100.0;
     let target_centi = if scaled >= 0.0 {
@@ -546,6 +560,7 @@ pub struct MetricsSnapshot {
     pub temp_centi: i32,
     pub pid_deci: u16,
     pub relay_on: bool,
+    pub collection_enabled: bool,
     pub sensor_status_code: u8,
     pub led_red: u8,
     pub led_green: u8,
@@ -704,6 +719,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
     let temp_centi = LAST_TEMP_CENTI.load(Ordering::Relaxed);
     let pid_deci = LAST_PID_OUTPUT_DECI_PERCENT.load(Ordering::Relaxed);
     let relay_on = LAST_RELAY_ON.load(Ordering::Relaxed);
+    let collection_enabled = COLLECTION_ENABLED.load(Ordering::Relaxed);
     let sensor_status_code = LAST_SENSOR_STATUS.load(Ordering::Relaxed);
     let led_red = LAST_LED_RED.load(Ordering::Relaxed);
     let led_green = LAST_LED_GREEN.load(Ordering::Relaxed);
@@ -731,6 +747,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
         temp_centi,
         pid_deci,
         relay_on,
+        collection_enabled,
         sensor_status_code,
         led_red,
         led_green,
@@ -1001,7 +1018,16 @@ pub enum HttpLedState {
     ActiveError,
 }
 
+const HTTP_LED_HOLD_MS: u64 = 1_200;
+
 pub fn http_exchange_begin() {
+    let now_ticks = embassy_time::Instant::now().as_ticks();
+    let hold_ticks = HTTP_LED_HOLD_MS.saturating_mul(embassy_time::TICK_HZ) / 1_000;
+    critical_section::with(|cs| {
+        HTTP_LED_ACTIVE_UNTIL_TICKS
+            .borrow(cs)
+            .set(now_ticks.saturating_add(hold_ticks));
+    });
     HTTP_EXCHANGE_ERROR.store(false, Ordering::Relaxed);
     HTTP_EXCHANGE_ACTIVE.store(true, Ordering::Relaxed);
 }
@@ -1018,12 +1044,18 @@ pub fn http_exchange_end() {
 }
 
 pub fn http_led_state() -> HttpLedState {
-    if !HTTP_EXCHANGE_ACTIVE.load(Ordering::Relaxed) {
-        HttpLedState::Idle
-    } else if HTTP_EXCHANGE_ERROR.load(Ordering::Relaxed) {
+    if HTTP_EXCHANGE_ACTIVE.load(Ordering::Relaxed) && HTTP_EXCHANGE_ERROR.load(Ordering::Relaxed) {
         HttpLedState::ActiveError
-    } else {
+    } else if HTTP_EXCHANGE_ACTIVE.load(Ordering::Relaxed) {
         HttpLedState::ActiveOk
+    } else {
+        let now_ticks = embassy_time::Instant::now().as_ticks();
+        let active_until = critical_section::with(|cs| HTTP_LED_ACTIVE_UNTIL_TICKS.borrow(cs).get());
+        if now_ticks < active_until {
+            HttpLedState::ActiveOk
+        } else {
+            HttpLedState::Idle
+        }
     }
 }
 

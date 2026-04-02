@@ -1,6 +1,25 @@
 const TREND_SAMPLE_INTERVAL_SECONDS = 2;
 const HISTORY_FETCH_POINTS = 2000;
 let lastHistorySeq = -1;
+let collecting = false;
+let syncCollectingUi = null;
+let collectionToggleInFlight = false;
+let pollRequestInFlight = false;
+const NO_DATA_FONT = "700 20px 'Avenir Next', 'Trebuchet MS', sans-serif";
+
+const delayMs = (ms) => new Promise((resolve) => {
+  window.setTimeout(resolve, ms);
+});
+
+const drawNoData = (ctx, width, height) => {
+  ctx.save();
+  ctx.font = NO_DATA_FONT;
+  ctx.fillStyle = "rgba(230, 241, 255, 0.72)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("No Data", Math.round(width / 2), Math.round(height / 2));
+  ctx.restore();
+};
 
 const formatElapsed = (totalSeconds) => {
   const h = Math.floor(totalSeconds / 3600);
@@ -67,7 +86,10 @@ class Sparkline {
     const { width, height } = this.canvas;
     ctx.clearRect(0, 0, width, height);
 
-    if (this.values.length < 2) return;
+    if (this.values.length < 2) {
+      drawNoData(ctx, width, height);
+      return;
+    }
 
     const min = Math.min(...this.values);
     const max = Math.max(...this.values);
@@ -232,7 +254,10 @@ class PidChart {
     const { width, height } = this.canvas;
     ctx.clearRect(0, 0, width, height);
 
-    if (this.values.length < 2) return;
+    if (this.values.length < 2) {
+      drawNoData(ctx, width, height);
+      return;
+    }
 
     const axisPadLeft = 46;
     const plotPadTop = 8;
@@ -417,6 +442,30 @@ const clearHistoryOnDevice = async () => {
   }
 };
 
+const setCollectionOnDevice = async (enabled) => {
+  const path = enabled ? "/collection/start" : "/collection/stop";
+  // Avoid colliding control requests with in-flight polling on the single-connection HTTP task.
+  for (let i = 0; i < 6 && pollRequestInFlight; i += 1) {
+    await delayMs(80);
+  }
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(path, { method: "POST", cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) {
+        await delayMs(120 * attempt);
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+};
+
 const loadHistoryFromDevice = async (sparkline, pidChart) => {
   const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
   if (!response.ok) {
@@ -492,9 +541,19 @@ const updateNtpPill = (synced) => {
 };
 
 const updateFromStatus = (data, sparkline, pidChart) => {
+  if (typeof data.system.collecting === "boolean") {
+    if (syncCollectingUi) {
+      syncCollectingUi(data.system.collecting);
+    } else {
+      collecting = data.system.collecting;
+    }
+  }
+
   lastUptimeSeconds = data.system.uptime_s;
-  sparkline.setElapsedSeconds(data.system.uptime_s);
-  pidChart.setElapsedSeconds(data.system.uptime_s);
+  if (collecting) {
+    sparkline.setElapsedSeconds(data.system.uptime_s);
+    pidChart.setElapsedSeconds(data.system.uptime_s);
+  }
 
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
   setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
@@ -502,7 +561,7 @@ const updateFromStatus = (data, sparkline, pidChart) => {
   setText("temp", formatTemp(data.sensor.ds18b20.temperature_c, "C"));
   setText("temp-secondary", formatTemp(data.sensor.ds18b20.temperature_f, "F"));
 
-  if (data.sensor.ds18b20.temperature_c !== null) {
+  if (collecting && data.sensor.ds18b20.temperature_c !== null) {
     sparkline.push(data.sensor.ds18b20.temperature_c);
   }
 
@@ -513,9 +572,12 @@ const updateFromStatus = (data, sparkline, pidChart) => {
     targetInput.value = data.pid.target_c.toFixed(1);
   }
 
-  setText("pid", `${data.pid.output_percent.toFixed(1)}%`);
-  setText("relay", data.pid.relay_on ? "Relay ON" : "Relay OFF");
-  pidChart.push({
+  setText("pid", collecting ? `${data.pid.output_percent.toFixed(1)}%` : "0.0%");
+  const relayState = !collecting ? "Deactivated" : (data.pid.relay_on ? "On" : "Off");
+  setText("relay", relayState);
+  byId("relay").style.color = relayState === "Deactivated" ? "#ff6e6e" : "";
+  if (collecting) {
+    pidChart.push({
     target_c: data.pid.target_c,
     kp: data.pid.kp,
     ki: data.pid.ki,
@@ -524,7 +586,8 @@ const updateFromStatus = (data, sparkline, pidChart) => {
     window_step: data.pid.window_step,
     on_steps: data.pid.on_steps,
     relay_on: data.pid.relay_on ? 1 : 0,
-  });
+    });
+  }
 
   setText("ip", data.system.ip || "--");
   updateNtpPill(data.system.ntp.synced);
@@ -538,6 +601,11 @@ const updateFromStatus = (data, sparkline, pidChart) => {
 };
 
 const loop = async (sparkline, pidChart) => {
+  if (collectionToggleInFlight || pollRequestInFlight) {
+    return;
+  }
+
+  pollRequestInFlight = true;
   try {
     const response = await fetch("/status", { cache: "no-store" });
     if (!response.ok) {
@@ -545,12 +613,16 @@ const loop = async (sparkline, pidChart) => {
     }
     const payload = await response.json();
     updateFromStatus(payload, sparkline, pidChart);
-    await mergeHistoryFromDevice(sparkline, pidChart);
+    if (collecting) {
+      await mergeHistoryFromDevice(sparkline, pidChart);
+    }
   } catch (error) {
     setText("updated", `Update failed: ${String(error)}`);
     const pill = byId("ntp-pill");
     pill.className = "status-pill status-danger";
     pill.textContent = "Link error";
+  } finally {
+    pollRequestInFlight = false;
   }
 };
 
@@ -610,6 +682,58 @@ const start = () => {
   const menuBtn = byId("menu-btn");
   const menuDropdown = byId("menu-dropdown");
   const clearDataBtn = byId("clear-data");
+  const startDataBtn = byId("start-data");
+  const stopDataBtn = byId("stop-data");
+
+  const setCollecting = (value) => {
+    collecting = value;
+    startDataBtn.disabled = value;
+    stopDataBtn.disabled = !value;
+  };
+
+  syncCollectingUi = setCollecting;
+
+  setCollecting(false);
+
+  startDataBtn.addEventListener("click", () => {
+    if (collectionToggleInFlight) {
+      return;
+    }
+    collectionToggleInFlight = true;
+    startDataBtn.disabled = true;
+    stopDataBtn.disabled = true;
+    void setCollectionOnDevice(true)
+      .then(() => {
+        setCollecting(true);
+      })
+      .catch((error) => {
+        setText("updated", `Start failed: ${String(error)}`);
+        setCollecting(false);
+      })
+      .finally(() => {
+        collectionToggleInFlight = false;
+      });
+  });
+
+  stopDataBtn.addEventListener("click", () => {
+    if (collectionToggleInFlight) {
+      return;
+    }
+    collectionToggleInFlight = true;
+    startDataBtn.disabled = true;
+    stopDataBtn.disabled = true;
+    void setCollectionOnDevice(false)
+      .then(() => {
+        setCollecting(false);
+      })
+      .catch((error) => {
+        setText("updated", `Stop failed: ${String(error)}`);
+        setCollecting(true);
+      })
+      .finally(() => {
+        collectionToggleInFlight = false;
+      });
+  });
 
   menuBtn.addEventListener("click", (event) => {
     event.stopPropagation();

@@ -124,6 +124,7 @@ pub fn json() -> String {
     let temp_centi = snapshot.temp_centi;
     let pid_deci = snapshot.pid_deci;
     let relay_on = snapshot.relay_on;
+    let collection_enabled = snapshot.collection_enabled;
     let sensor_status_code = snapshot.sensor_status_code;
     let led_red = snapshot.led_red;
     let led_green = snapshot.led_green;
@@ -254,10 +255,12 @@ pub fn json() -> String {
         out,
         concat!(
             ",\n",
+            "    \"collecting\": {},\n",
             "    \"ntp\": {{\n",
             "      \"synced\": {},\n",
             "      \"time\": ",
         ),
+        if collection_enabled { "true" } else { "false" },
         if ntp_synced { "true" } else { "false" },
     );
     if let Some(secs) = current_ntp_time {
