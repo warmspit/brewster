@@ -417,6 +417,42 @@ pub fn json() -> String {
     out
 }
 
+pub fn history_json(max_points: usize) -> String {
+    let points = status::history_snapshot(max_points);
+    let mut out = String::with_capacity(256 + points.len().saturating_mul(40));
+    let _ = write!(
+        out,
+        concat!(
+            "{{\n",
+            "  \"sample_interval_s\": {},\n",
+            "  \"total_samples\": {},\n",
+            "  \"points\": ["
+        ),
+        status::history_sample_interval_secs(),
+        status::history_total_samples(),
+    );
+
+    for (idx, point) in points.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "\n    [{},{:.2},{:.2},{:.1},{},{},{}]",
+            point.seq,
+            point.temp_c,
+            point.target_c,
+            point.output_percent,
+            point.window_step,
+            point.on_steps,
+            if point.relay_on { 1 } else { 0 },
+        );
+    }
+
+    out.push_str("\n  ]\n}\n");
+    out
+}
+
 /// Serialize device state as human-readable text.
 #[allow(
     clippy::large_stack_frames,

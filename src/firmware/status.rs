@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 David Bannister
 
+use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, Ordering};
 use critical_section::Mutex;
+use embedded_storage::nor_flash::NorFlash;
 use embedded_storage::{ReadStorage, Storage};
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::peripherals::FLASH;
@@ -71,6 +73,21 @@ const TARGET_STORE_MAGIC: [u8; 4] = *b"BRWT";
 const TARGET_STORE_VERSION: u8 = 1;
 const TARGET_STORE_SIZE: usize = 9;
 const TARGET_PARTITION_LABEL: &str = "cfg";
+const HISTORY_RECORD_SIZE: u32 = 16;
+const HISTORY_DATA_OFFSET: u32 = 0x1000;
+const HISTORY_SECTOR_SIZE: u32 = 0x1000;
+const HISTORY_SAMPLE_INTERVAL_SECS: u32 = 60;
+
+#[derive(Clone, Copy)]
+pub struct HistorySample {
+    pub seq: u32,
+    pub temp_c: f32,
+    pub target_c: f32,
+    pub output_percent: f32,
+    pub window_step: u8,
+    pub on_steps: u8,
+    pub relay_on: bool,
+}
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum NetState {
@@ -123,6 +140,12 @@ static NTP_PEERS: Mutex<RefCell<[Option<NtpPeerState>; NTP_MAX_TRACKED_PEERS]>> 
 static TARGET_TEMP_CENTI: AtomicI32 = AtomicI32::new(2111);
 static TARGET_STORE_OFFSET: AtomicU32 = AtomicU32::new(0);
 static TARGET_STORE_PARTITION_LEN: AtomicU32 = AtomicU32::new(0);
+static HISTORY_BASE_OFFSET: AtomicU32 = AtomicU32::new(0);
+static HISTORY_CAPACITY: AtomicU32 = AtomicU32::new(0);
+static HISTORY_WRITE_INDEX: AtomicU32 = AtomicU32::new(0);
+static HISTORY_NEXT_SEQ: AtomicU32 = AtomicU32::new(0);
+static HISTORY_COUNT: AtomicU32 = AtomicU32::new(0);
+static HISTORY_LAST_PERSIST_UPTIME_S: AtomicU32 = AtomicU32::new(0);
 static TEMP_PROBE_NAME: Mutex<RefCell<heapless::String<TEMP_PROBE_NAME_MAX_LEN>>> =
     Mutex::new(RefCell::new(heapless::String::new()));
 static FLASH_STORAGE: Mutex<RefCell<Option<FlashStorage<'static>>>> =
@@ -132,6 +155,235 @@ static PARTITION_TABLE_BUFFER: ConstStaticCell<[u8; PARTITION_TABLE_MAX_LEN]> =
 
 fn valid_target_centi(target_centi: i32) -> bool {
     (TARGET_TEMP_MIN_CENTI..=TARGET_TEMP_MAX_CENTI).contains(&target_centi)
+}
+
+fn history_record_valid(raw: &[u8; HISTORY_RECORD_SIZE as usize]) -> bool {
+    u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) != u32::MAX
+}
+
+fn history_record_offset(index: u32) -> u32 {
+    HISTORY_BASE_OFFSET.load(Ordering::Relaxed) + index.saturating_mul(HISTORY_RECORD_SIZE)
+}
+
+fn history_init(storage: &mut FlashStorage<'static>, partition_offset: u32, partition_len: u32) {
+    if partition_len <= HISTORY_DATA_OFFSET + HISTORY_RECORD_SIZE {
+        HISTORY_BASE_OFFSET.store(0, Ordering::Relaxed);
+        HISTORY_CAPACITY.store(0, Ordering::Relaxed);
+        HISTORY_WRITE_INDEX.store(0, Ordering::Relaxed);
+        HISTORY_NEXT_SEQ.store(0, Ordering::Relaxed);
+        HISTORY_COUNT.store(0, Ordering::Relaxed);
+        return;
+    }
+
+    let base = partition_offset + HISTORY_DATA_OFFSET;
+    let capacity = (partition_len - HISTORY_DATA_OFFSET) / HISTORY_RECORD_SIZE;
+    HISTORY_BASE_OFFSET.store(base, Ordering::Relaxed);
+    HISTORY_CAPACITY.store(capacity, Ordering::Relaxed);
+
+    let mut raw = [0u8; HISTORY_RECORD_SIZE as usize];
+    let mut max_seq = 0u32;
+    let mut max_index = 0u32;
+    let mut has_records = false;
+    let mut valid_count = 0u32;
+
+    for index in 0..capacity {
+        let offset = base + index.saturating_mul(HISTORY_RECORD_SIZE);
+        if storage.read(offset, &mut raw).is_err() {
+            continue;
+        }
+        if !history_record_valid(&raw) {
+            continue;
+        }
+        valid_count = valid_count.saturating_add(1);
+        let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        if !has_records || seq > max_seq {
+            has_records = true;
+            max_seq = seq;
+            max_index = index;
+        }
+    }
+
+    if has_records {
+        HISTORY_WRITE_INDEX.store((max_index + 1) % capacity, Ordering::Relaxed);
+        HISTORY_NEXT_SEQ.store(max_seq.wrapping_add(1), Ordering::Relaxed);
+        HISTORY_COUNT.store(valid_count, Ordering::Relaxed);
+    } else {
+        HISTORY_WRITE_INDEX.store(0, Ordering::Relaxed);
+        HISTORY_NEXT_SEQ.store(0, Ordering::Relaxed);
+        HISTORY_COUNT.store(0, Ordering::Relaxed);
+    }
+}
+
+fn persist_history_sample(sample: &RuntimeSample) {
+    let now_uptime_s = (embassy_time::Instant::now().as_ticks() / embassy_time::TICK_HZ) as u32;
+    let last = HISTORY_LAST_PERSIST_UPTIME_S.load(Ordering::Relaxed);
+    if last != 0 && now_uptime_s.saturating_sub(last) < HISTORY_SAMPLE_INTERVAL_SECS {
+        return;
+    }
+
+    let capacity = HISTORY_CAPACITY.load(Ordering::Relaxed);
+    if capacity == 0 {
+        return;
+    }
+
+    HISTORY_LAST_PERSIST_UPTIME_S.store(now_uptime_s, Ordering::Relaxed);
+
+    let target_centi = TARGET_TEMP_CENTI.load(Ordering::Relaxed) as i16;
+    let temp_centi = (sample.temp_c * 100.0) as i16;
+    let output_deci = (sample.pid_output * 10.0) as u16;
+
+    critical_section::with(|cs| {
+        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
+        let Some(storage) = guard.as_mut() else {
+            return;
+        };
+
+        let write_index = HISTORY_WRITE_INDEX.load(Ordering::Relaxed);
+        let mut count = HISTORY_COUNT.load(Ordering::Relaxed);
+        let offset = history_record_offset(write_index);
+        let records_per_sector = HISTORY_SECTOR_SIZE / HISTORY_RECORD_SIZE;
+
+        if offset % HISTORY_SECTOR_SIZE == 0 {
+            if storage.erase(offset, offset + HISTORY_SECTOR_SIZE).is_err() {
+                return;
+            }
+            let removed = core::cmp::min(count, records_per_sector);
+            count = count.saturating_sub(removed);
+        }
+
+        let seq = HISTORY_NEXT_SEQ.load(Ordering::Relaxed);
+        let mut raw = [0xFFu8; HISTORY_RECORD_SIZE as usize];
+        raw[0..4].copy_from_slice(&seq.to_le_bytes());
+        raw[4..6].copy_from_slice(&temp_centi.to_le_bytes());
+        raw[6..8].copy_from_slice(&target_centi.to_le_bytes());
+        raw[8..10].copy_from_slice(&output_deci.to_le_bytes());
+        raw[10] = sample.pid_window_step;
+        raw[11] = sample.pid_on_steps;
+        raw[12] = if sample.heating_on { 1 } else { 0 };
+        raw[13] = 0;
+        raw[14] = 0;
+        raw[15] = 0;
+
+        if Storage::write(storage, offset, &raw).is_err() {
+            return;
+        }
+
+        HISTORY_WRITE_INDEX.store((write_index + 1) % capacity, Ordering::Relaxed);
+        HISTORY_NEXT_SEQ.store(seq.wrapping_add(1), Ordering::Relaxed);
+        HISTORY_COUNT.store(
+            core::cmp::min(count.saturating_add(1), capacity),
+            Ordering::Relaxed,
+        );
+    });
+}
+
+pub fn clear_history_persistent() -> Result<(), PersistError> {
+    let capacity = HISTORY_CAPACITY.load(Ordering::Relaxed);
+    if capacity == 0 {
+        return Err(PersistError::MissingPartition);
+    }
+    let start = HISTORY_BASE_OFFSET.load(Ordering::Relaxed);
+    let end = start + capacity.saturating_mul(HISTORY_RECORD_SIZE);
+
+    critical_section::with(|cs| {
+        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
+        let Some(storage) = guard.as_mut() else {
+            return Err(PersistError::NotInitialized);
+        };
+
+        let mut sector = start;
+        while sector < end {
+            storage.erase(sector, sector + HISTORY_SECTOR_SIZE)?;
+            sector += HISTORY_SECTOR_SIZE;
+        }
+        Ok(())
+    })?;
+
+    HISTORY_WRITE_INDEX.store(0, Ordering::Relaxed);
+    HISTORY_NEXT_SEQ.store(0, Ordering::Relaxed);
+    HISTORY_COUNT.store(0, Ordering::Relaxed);
+    HISTORY_LAST_PERSIST_UPTIME_S.store(0, Ordering::Relaxed);
+    Ok(())
+}
+
+pub fn history_sample_interval_secs() -> u32 {
+    HISTORY_SAMPLE_INTERVAL_SECS
+}
+
+pub fn history_total_samples() -> u32 {
+    HISTORY_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn history_snapshot(max_points: usize) -> Vec<HistorySample> {
+    let capacity = HISTORY_CAPACITY.load(Ordering::Relaxed);
+    if capacity == 0 || max_points == 0 {
+        return Vec::new();
+    }
+
+    let start_index = HISTORY_WRITE_INDEX.load(Ordering::Relaxed);
+
+    critical_section::with(|cs| {
+        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
+        let Some(storage) = guard.as_mut() else {
+            return Vec::new();
+        };
+
+        let mut raw = [0u8; HISTORY_RECORD_SIZE as usize];
+        let mut valid_count = 0usize;
+        for step in 0..capacity {
+            let index = (start_index + step) % capacity;
+            if storage
+                .read(history_record_offset(index), &mut raw)
+                .is_err()
+            {
+                continue;
+            }
+            if history_record_valid(&raw) {
+                valid_count += 1;
+            }
+        }
+
+        if valid_count == 0 {
+            return Vec::new();
+        }
+
+        let keep = core::cmp::min(max_points, valid_count);
+        let skip = valid_count.saturating_sub(keep);
+        let mut out = Vec::with_capacity(keep);
+        let mut seen = 0usize;
+
+        for step in 0..capacity {
+            let index = (start_index + step) % capacity;
+            if storage
+                .read(history_record_offset(index), &mut raw)
+                .is_err()
+            {
+                continue;
+            }
+            if !history_record_valid(&raw) {
+                continue;
+            }
+
+            if seen >= skip {
+                let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+                let temp_centi = i16::from_le_bytes([raw[4], raw[5]]);
+                let target_centi = i16::from_le_bytes([raw[6], raw[7]]);
+                let output_deci = u16::from_le_bytes([raw[8], raw[9]]);
+                out.push(HistorySample {
+                    seq,
+                    temp_c: temp_centi as f32 / 100.0,
+                    target_c: target_centi as f32 / 100.0,
+                    output_percent: output_deci as f32 / 10.0,
+                    window_step: raw[10],
+                    on_steps: raw[11],
+                    relay_on: raw[12] != 0,
+                });
+            }
+            seen += 1;
+        }
+
+        out
+    })
 }
 
 #[allow(
@@ -169,6 +421,8 @@ pub fn init_persistent_target(flash: FLASH<'static>) -> Option<f32> {
             }
         }
     }
+
+    history_init(&mut storage, store_offset, store_len);
 
     critical_section::with(|cs| {
         FLASH_STORAGE.borrow_ref_mut(cs).replace(storage);
@@ -218,7 +472,7 @@ fn persist_target_temp_c(target_centi: i32) -> Result<(), PersistError> {
         raw[4] = TARGET_STORE_VERSION;
         raw[5..9].copy_from_slice(&target_centi.to_le_bytes());
 
-        storage.write(store_offset, &raw)?;
+        Storage::write(storage, store_offset, &raw)?;
         Ok(())
     })
 }
@@ -554,6 +808,7 @@ pub fn update_success(sample: RuntimeSample) {
     LAST_LED_BLUE.store(sample.led_blue, Ordering::Relaxed);
     LAST_PID_WINDOW_STEP.store(sample.pid_window_step, Ordering::Relaxed);
     LAST_PID_ON_STEPS.store(sample.pid_on_steps, Ordering::Relaxed);
+    persist_history_sample(&sample);
 }
 
 pub fn update_error(error: SensorError, led_red: u8, led_green: u8, led_blue: u8) {

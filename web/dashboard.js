@@ -1,7 +1,6 @@
 const TREND_SAMPLE_INTERVAL_SECONDS = 2;
-const STORAGE_KEY_TEMP = "brewster_temp_v1";
-const STORAGE_KEY_PID = "brewster_pid_v1";
-const STORAGE_KEY_UPTIME = "brewster_uptime_v1";
+const HISTORY_FETCH_POINTS = 2000;
+let lastHistorySeq = -1;
 
 const formatElapsed = (totalSeconds) => {
   const h = Math.floor(totalSeconds / 3600);
@@ -21,6 +20,7 @@ class Sparkline {
     this.canvas = canvas;
     this.values = [];
     this.hoverX = null;
+    this.elapsedSeconds = null;
     this.canvas.addEventListener("mousemove", (event) => {
       this.updateHover(event.clientX);
     });
@@ -28,26 +28,17 @@ class Sparkline {
       this.hoverX = null;
       this.draw();
     });
-    this.loadFromStorage();
+  }
+
+  setValues(values) {
+    this.values.length = 0;
+    this.values.push(...values);
     this.draw();
   }
 
-  loadFromStorage() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_TEMP);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.values.push(...parsed);
-        }
-      }
-    } catch {}
-  }
-
-  saveToStorage() {
-    try {
-      localStorage.setItem(STORAGE_KEY_TEMP, JSON.stringify(this.values));
-    } catch {}
+  setElapsedSeconds(seconds) {
+    this.elapsedSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : null;
+    this.draw();
   }
 
   updateHover(clientX) {
@@ -61,13 +52,11 @@ class Sparkline {
 
   push(value) {
     this.values.push(value);
-    this.saveToStorage();
     this.draw();
   }
 
   clear() {
     this.values.length = 0;
-    try { localStorage.removeItem(STORAGE_KEY_TEMP); } catch {}
     this.draw();
   }
 
@@ -121,7 +110,7 @@ class Sparkline {
     ctx.moveTo(axisPadLeft, height - plotPadBottom);
     ctx.lineTo(width - 4, height - plotPadBottom);
     ctx.stroke();
-    const elapsedSeconds = (this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS;
+    const elapsedSeconds = this.elapsedSeconds ?? ((this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS);
     ctx.save();
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
@@ -196,6 +185,7 @@ class PidChart {
     this.canvas = canvas;
     this.values = [];
     this.hoverX = null;
+    this.elapsedSeconds = null;
     this.canvas.addEventListener("mousemove", (event) => {
       this.updateHover(event.clientX);
     });
@@ -203,26 +193,17 @@ class PidChart {
       this.hoverX = null;
       this.draw();
     });
-    this.loadFromStorage();
+  }
+
+  setValues(values) {
+    this.values.length = 0;
+    this.values.push(...values);
     this.draw();
   }
 
-  loadFromStorage() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_PID);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.values.push(...parsed);
-        }
-      }
-    } catch {}
-  }
-
-  saveToStorage() {
-    try {
-      localStorage.setItem(STORAGE_KEY_PID, JSON.stringify(this.values));
-    } catch {}
+  setElapsedSeconds(seconds) {
+    this.elapsedSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : null;
+    this.draw();
   }
 
   updateHover(clientX) {
@@ -236,13 +217,11 @@ class PidChart {
 
   push(sample) {
     this.values.push(sample);
-    this.saveToStorage();
     this.draw();
   }
 
   clear() {
     this.values.length = 0;
-    try { localStorage.removeItem(STORAGE_KEY_PID); } catch {}
     this.draw();
   }
 
@@ -312,7 +291,7 @@ class PidChart {
     ctx.moveTo(axisPadLeft, height - plotPadBottom);
     ctx.lineTo(width - 4, height - plotPadBottom);
     ctx.stroke();
-    const elapsedSeconds = (this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS;
+    const elapsedSeconds = this.elapsedSeconds ?? ((this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS);
     ctx.save();
     ctx.textAlign = "right";
     ctx.fillText(`T+${formatElapsed(elapsedSeconds)}`, width - 4, height - 2);
@@ -403,14 +382,7 @@ const formatUptime = (uptimeSec) => {
   return `${h}h ${m}m ${s}s`;
 };
 
-let lastUptimeSeconds = (() => {
-  try {
-    const v = localStorage.getItem(STORAGE_KEY_UPTIME);
-    return v !== null ? Number(v) : null;
-  } catch {
-    return null;
-  }
-})();
+let lastUptimeSeconds = null;
 
 const setTargetFeedback = (text, tone = "normal") => {
   const feedback = byId("target-feedback");
@@ -438,6 +410,76 @@ const submitTargetTemperature = async (tempC) => {
   }
 };
 
+const clearHistoryOnDevice = async () => {
+  const response = await fetch("/history/clear", { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+};
+
+const loadHistoryFromDevice = async (sparkline, pidChart) => {
+  const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const payload = await response.json();
+  const points = Array.isArray(payload.points) ? payload.points : [];
+  const tempValues = [];
+  const pidValues = [];
+
+  points.forEach((point) => {
+    if (!Array.isArray(point) || point.length < 7) {
+      return;
+    }
+    tempValues.push(Number(point[1]));
+    pidValues.push({
+      target_c: Number(point[2]),
+      kp: 14.0,
+      ki: 0.35,
+      kd: 6.0,
+      output_percent: Number(point[3]),
+      window_step: Number(point[4]),
+      on_steps: Number(point[5]),
+      relay_on: Number(point[6]),
+    });
+    lastHistorySeq = Number(point[0]);
+  });
+
+  sparkline.setValues(tempValues);
+  pidChart.setValues(pidValues);
+};
+
+const mergeHistoryFromDevice = async (sparkline, pidChart) => {
+  const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const payload = await response.json();
+  const points = Array.isArray(payload.points) ? payload.points : [];
+
+  points.forEach((point) => {
+    if (!Array.isArray(point) || point.length < 7) {
+      return;
+    }
+    const seq = Number(point[0]);
+    if (!Number.isFinite(seq) || seq <= lastHistorySeq) {
+      return;
+    }
+    lastHistorySeq = seq;
+    sparkline.push(Number(point[1]));
+    pidChart.push({
+      target_c: Number(point[2]),
+      kp: 14.0,
+      ki: 0.35,
+      kd: 6.0,
+      output_percent: Number(point[3]),
+      window_step: Number(point[4]),
+      on_steps: Number(point[5]),
+      relay_on: Number(point[6]),
+    });
+  });
+};
+
 const updateNtpPill = (synced) => {
   const pill = byId("ntp-pill");
   if (synced) {
@@ -451,7 +493,8 @@ const updateNtpPill = (synced) => {
 
 const updateFromStatus = (data, sparkline, pidChart) => {
   lastUptimeSeconds = data.system.uptime_s;
-  try { localStorage.setItem(STORAGE_KEY_UPTIME, String(lastUptimeSeconds)); } catch {}
+  sparkline.setElapsedSeconds(data.system.uptime_s);
+  pidChart.setElapsedSeconds(data.system.uptime_s);
 
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
   setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
@@ -502,6 +545,7 @@ const loop = async (sparkline, pidChart) => {
     }
     const payload = await response.json();
     updateFromStatus(payload, sparkline, pidChart);
+    await mergeHistoryFromDevice(sparkline, pidChart);
   } catch (error) {
     setText("updated", `Update failed: ${String(error)}`);
     const pill = byId("ntp-pill");
@@ -552,7 +596,13 @@ const start = () => {
     }
   });
 
-  void loop(sparkline, pidChart);
+  loadHistoryFromDevice(sparkline, pidChart)
+    .catch((error) => {
+      setText("updated", `History load failed: ${String(error)}`);
+    })
+    .finally(() => {
+      void loop(sparkline, pidChart);
+    });
   window.setInterval(() => {
     void loop(sparkline, pidChart);
   }, 2000);
@@ -577,12 +627,19 @@ const start = () => {
   });
 
   clearDataBtn.addEventListener("click", () => {
-    sparkline.clear();
-    pidChart.clear();
-    try { localStorage.removeItem(STORAGE_KEY_UPTIME); } catch {}
-    lastUptimeSeconds = null;
-    menuDropdown.classList.remove("open");
-    menuBtn.setAttribute("aria-expanded", "false");
+    clearHistoryOnDevice()
+      .then(() => {
+        sparkline.clear();
+        pidChart.clear();
+        lastUptimeSeconds = null;
+      })
+      .catch((error) => {
+        setText("updated", `Clear failed: ${String(error)}`);
+      })
+      .finally(() => {
+        menuDropdown.classList.remove("open");
+        menuBtn.setAttribute("aria-expanded", "false");
+      });
   });
 };
 

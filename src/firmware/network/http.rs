@@ -503,11 +503,40 @@ enum ParsedRequest {
     GetDashboard,
     GetDashboardScript,
     GetStatus,
+    GetHistory(usize),
     GetMetrics,
     PostTemperature(f32),
+    PostHistoryClear,
     PostProbeName(alloc::string::String),
     BadRequest,
     NotFound,
+}
+
+fn parse_history_points(buf: &[u8]) -> usize {
+    const DEFAULT_POINTS: usize = 2000;
+    const MAX_POINTS: usize = 5000;
+
+    let line_end = match buf.windows(2).position(|w| w == b"\r\n") {
+        Some(i) => i,
+        None => return DEFAULT_POINTS,
+    };
+    let line = match core::str::from_utf8(&buf[..line_end]) {
+        Ok(v) => v,
+        Err(_) => return DEFAULT_POINTS,
+    };
+    let query_pos = match line.find("?") {
+        Some(i) => i,
+        None => return DEFAULT_POINTS,
+    };
+    let query = &line[query_pos + 1..];
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("points=")
+            && let Ok(parsed) = value.parse::<usize>()
+        {
+            return parsed.clamp(1, MAX_POINTS);
+        }
+    }
+    DEFAULT_POINTS
 }
 
 fn parse_request(buf: &[u8]) -> ParsedRequest {
@@ -534,6 +563,13 @@ fn parse_request(buf: &[u8]) -> ParsedRequest {
         || buf.starts_with(b"GET /status\r")
     {
         return ParsedRequest::GetStatus;
+    }
+
+    if buf.starts_with(b"GET /history ")
+        || buf.starts_with(b"GET /history?")
+        || buf.starts_with(b"GET /history\r")
+    {
+        return ParsedRequest::GetHistory(parse_history_points(buf));
     }
 
     if buf.starts_with(b"GET /metrics ")
@@ -581,6 +617,10 @@ fn parse_request(buf: &[u8]) -> ParsedRequest {
             Some(name) => ParsedRequest::PostProbeName(name),
             None => ParsedRequest::BadRequest,
         };
+    }
+
+    if buf.starts_with(b"POST /history/clear ") || buf.starts_with(b"POST /history/clear\r") {
+        return ParsedRequest::PostHistoryClear;
     }
 
     ParsedRequest::NotFound
@@ -704,6 +744,15 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                     ResponseBody::Owned(metrics::json()),
                 )
             }
+            ParsedRequest::GetHistory(points) => {
+                println!("http: serving history({}) to {:?}", points, remote);
+                (
+                    "200 OK",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Owned(metrics::history_json(points)),
+                )
+            }
             ParsedRequest::GetMetrics => {
                 println!("http: serving metrics to {:?}", remote);
                 (
@@ -780,6 +829,26 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                         "{\n  \"error\": \"invalid_probe_name\", \"allowed\": \"[A-Za-z0-9 ._-]\"\n}\n",
                     ),
                 ),
+            },
+            ParsedRequest::PostHistoryClear => match status::clear_history_persistent() {
+                Ok(()) => (
+                    "200 OK",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Static("{\n  \"ok\": true\n}\n"),
+                ),
+                Err(error) => {
+                    println!(
+                        "http: failed to clear history from {:?}: {:?}",
+                        remote, error
+                    );
+                    (
+                        "500 Internal Server Error",
+                        "application/json",
+                        "no-store",
+                        ResponseBody::Static("{\n  \"error\": \"history_clear_failed\"\n}\n"),
+                    )
+                }
             },
             ParsedRequest::BadRequest => (
                 "400 Bad Request",
