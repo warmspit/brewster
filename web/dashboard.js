@@ -1,4 +1,3 @@
-const TREND_STORAGE_KEY = "brewster.dashboard.tempTrend.v1";
 const TREND_SAMPLE_INTERVAL_SECONDS = 2;
 
 const formatElapsed = (totalSeconds) => {
@@ -25,16 +24,9 @@ class Sparkline {
     this.draw();
   }
 
-  replaceValues(values) {
+  clear() {
     this.values.length = 0;
-    values.forEach((value) => {
-      this.values.push(value);
-    });
     this.draw();
-  }
-
-  snapshot() {
-    return [...this.values];
   }
 
   draw() {
@@ -125,6 +117,11 @@ class PidChart {
 
   push(sample) {
     this.values.push(sample);
+    this.draw();
+  }
+
+  clear() {
+    this.values.length = 0;
     this.draw();
   }
 
@@ -247,30 +244,7 @@ const formatUptime = (uptimeSec) => {
   return `${h}h ${m}m ${s}s`;
 };
 
-const loadPersistedTrend = () => {
-  try {
-    const raw = window.localStorage.getItem(TREND_STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed
-      .filter((value) => typeof value === "number" && Number.isFinite(value));
-  } catch {
-    return [];
-  }
-};
-
-const persistTrend = (values) => {
-  try {
-    window.localStorage.setItem(TREND_STORAGE_KEY, JSON.stringify(values));
-  } catch {
-    // Ignore storage errors (quota, privacy mode, etc.).
-  }
-};
+let lastUptimeSeconds = null;
 
 const setTargetFeedback = (text, tone = "normal") => {
   const feedback = byId("target-feedback");
@@ -310,6 +284,12 @@ const updateNtpPill = (synced) => {
 };
 
 const updateFromStatus = (data, sparkline, pidChart) => {
+  if (lastUptimeSeconds !== null && data.system.uptime_s < lastUptimeSeconds) {
+    sparkline.clear();
+    pidChart.clear();
+  }
+  lastUptimeSeconds = data.system.uptime_s;
+
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
   setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
 
@@ -318,7 +298,6 @@ const updateFromStatus = (data, sparkline, pidChart) => {
 
   if (data.sensor.ds18b20.temperature_c !== null) {
     sparkline.push(data.sensor.ds18b20.temperature_c);
-    persistTrend(sparkline.snapshot());
   }
 
   setText("target", `${data.pid.target_c.toFixed(1)} C`);
@@ -373,7 +352,6 @@ const start = () => {
   const pidCanvas = byId("pid-chart");
   const sparkline = new Sparkline(chart);
   const pidChart = new PidChart(pidCanvas);
-  sparkline.replaceValues(loadPersistedTrend());
   const targetInput = byId("target-input");
   const targetSubmit = byId("target-submit");
 

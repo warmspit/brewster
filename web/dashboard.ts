@@ -2,7 +2,6 @@ export {};
 
 type NullableNumber = number | null;
 
-const TREND_STORAGE_KEY = "brewster.dashboard.tempTrend.v1";
 const TREND_SAMPLE_INTERVAL_SECONDS = 2;
 
 const formatElapsed = (totalSeconds: number): string => {
@@ -79,16 +78,9 @@ class Sparkline {
     this.draw();
   }
 
-  replaceValues(values: number[]): void {
+  clear(): void {
     this.values.length = 0;
-    values.forEach((value) => {
-      this.values.push(value);
-    });
     this.draw();
-  }
-
-  snapshot(): number[] {
-    return [...this.values];
   }
 
   private draw(): void {
@@ -184,6 +176,11 @@ class PidChart {
 
   push(sample: PidSample): void {
     this.values.push(sample);
+    this.draw();
+  }
+
+  clear(): void {
+    this.values.length = 0;
     this.draw();
   }
 
@@ -306,30 +303,7 @@ const formatUptime = (uptimeSec: number): string => {
   return `${h}h ${m}m ${s}s`;
 };
 
-const loadPersistedTrend = (): number[] => {
-  try {
-    const raw = window.localStorage.getItem(TREND_STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed
-      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  } catch {
-    return [];
-  }
-};
-
-const persistTrend = (values: number[]): void => {
-  try {
-    window.localStorage.setItem(TREND_STORAGE_KEY, JSON.stringify(values));
-  } catch {
-    // Ignore storage errors (quota, privacy mode, etc.).
-  }
-};
+let lastUptimeSeconds: number | null = null;
 
 const setTargetFeedback = (text: string, tone: "normal" | "ok" | "error" = "normal"): void => {
   const feedback = byId<HTMLElement>("target-feedback");
@@ -369,6 +343,12 @@ const updateNtpPill = (synced: boolean): void => {
 };
 
 const updateFromStatus = (data: StatusPayload, sparkline: Sparkline, pidChart: PidChart): void => {
+  if (lastUptimeSeconds !== null && data.system.uptime_s < lastUptimeSeconds) {
+    sparkline.clear();
+    pidChart.clear();
+  }
+  lastUptimeSeconds = data.system.uptime_s;
+
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
   setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
 
@@ -377,7 +357,6 @@ const updateFromStatus = (data: StatusPayload, sparkline: Sparkline, pidChart: P
 
   if (data.sensor.ds18b20.temperature_c !== null) {
     sparkline.push(data.sensor.ds18b20.temperature_c);
-    persistTrend(sparkline.snapshot());
   }
 
   setText("target", `${data.pid.target_c.toFixed(1)} C`);
@@ -432,7 +411,6 @@ const start = (): void => {
   const pidCanvas = byId<HTMLCanvasElement>("pid-chart");
   const sparkline = new Sparkline(chart);
   const pidChart = new PidChart(pidCanvas);
-  sparkline.replaceValues(loadPersistedTrend());
   const targetInput = byId<HTMLInputElement>("target-input");
   const targetSubmit = byId<HTMLButtonElement>("target-submit");
 
