@@ -233,7 +233,7 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                     <div class="kpi-sub" id="target-secondary">--.- F</div>
                     <div class="target-control">
                         <div class="target-input-row">
-                            <input id="target-input" class="target-input" type="number" min="0" max="150" step="0.1" placeholder="Set target C" />
+                            <input id="target-input" class="target-input" type="number" min="25" max="150" step="0.1" placeholder="Set target C" />
                             <button id="target-submit" class="target-button" type="button">Apply</button>
                         </div>
                         <div class="kpi-sub" id="target-feedback"></div>
@@ -582,7 +582,7 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                 )
             }
             ParsedRequest::PostTemperature(temp) => {
-                if !(0.0_f32..=150.0).contains(&temp) {
+                if !(25.0_f32..=150.0).contains(&temp) {
                     (
                         "400 Bad Request",
                         "application/json",
