@@ -5,6 +5,8 @@ let collecting = false;
 let syncCollectingUi = null;
 let collectionToggleInFlight = false;
 let pollRequestInFlight = false;
+let zoomStart = 0;
+let zoomEnd = 1;
 const NO_DATA_FONT = "700 20px 'Avenir Next', 'Trebuchet MS', sans-serif";
 
 const delayMs = (ms) => new Promise((resolve) => {
@@ -98,6 +100,10 @@ class Sparkline {
     this.draw();
   }
 
+  redraw() {
+    this.draw();
+  }
+
   draw() {
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;
@@ -110,15 +116,25 @@ class Sparkline {
       return;
     }
 
-    const min = Math.min(...this.values);
-    const max = Math.max(...this.values);
-    const spread = Math.max(0.1, max - min);
     const axisPadLeft = 46;
     const plotPadTop = 8;
     const plotPadBottom = 8;
     const plotWidth = Math.max(1, width - axisPadLeft - 6);
     const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
-    const xStep = this.values.length > 1 ? plotWidth / (this.values.length - 1) : 0;
+    const n = this.values.length;
+    const visStart = zoomStart * (n - 1);
+    const visEnd = zoomEnd * (n - 1);
+    const iFirst = Math.max(0, Math.floor(visStart));
+    const iLast = Math.min(n - 1, Math.ceil(visEnd));
+    const xForIdx = (i) => axisPadLeft + ((i - visStart) / Math.max(1, visEnd - visStart)) * plotWidth;
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    for (let i = iFirst; i <= iLast; i++) {
+      const v = this.values[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    const spread = Math.max(0.1, max - min);
 
     const yFor = (v) => {
       const norm = (v - min) / spread;
@@ -156,37 +172,45 @@ class Sparkline {
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
     ctx.textAlign = "right";
-    ctx.fillText(`T+${formatElapsed(elapsedSeconds)}`, width - 4, height - 2);
+    ctx.fillText(`T+${formatElapsed(Math.round(elapsedSeconds * zoomEnd))}`, width - 4, height - 2);
+    if (zoomStart > 0.001) {
+      ctx.textAlign = "left";
+      ctx.fillText(`T+${formatElapsed(Math.round(elapsedSeconds * zoomStart))}`, axisPadLeft + 4, height - 2);
+    }
     ctx.restore();
 
     const gradient = ctx.createLinearGradient(0, 0, width, 0);
     gradient.addColorStop(0, "#40c4ff");
     gradient.addColorStop(1, "#40d990");
 
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
+    ctx.clip();
     ctx.lineWidth = 2;
     ctx.strokeStyle = gradient;
     ctx.beginPath();
-
-    this.values.forEach((v, i) => {
-      const x = axisPadLeft + i * xStep;
-      const y = yFor(v);
-      if (i === 0) {
+    for (let i = iFirst; i <= iLast; i++) {
+      const x = xForIdx(i);
+      const y = yFor(this.values[i]);
+      if (i === iFirst) {
         ctx.moveTo(x, y);
       } else {
         ctx.lineTo(x, y);
       }
-    });
-
+    }
     ctx.stroke();
+    ctx.restore();
 
     if (this.hoverX !== null && this.values.length > 0) {
       const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this.hoverX));
       const ratio = (clampedX - axisPadLeft) / plotWidth;
-      const index = Math.round(ratio * (this.values.length - 1));
+      const index = Math.max(0, Math.min(n - 1, Math.round(visStart + ratio * (visEnd - visStart))));
       const value = this.values[index];
       const x = clampedX;
       const y = yFor(value);
-      const tip = `${value.toFixed(2)} C  T+${formatElapsed(Math.round(ratio * elapsedSeconds))}`;
+      const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
+      const tip = `${value.toFixed(2)} C  T+${formatElapsed(Math.round(hoverTime))}`;
 
       ctx.save();
       ctx.strokeStyle = "rgba(255,255,255,0.35)";
@@ -216,6 +240,15 @@ class Sparkline {
       ctx.strokeRect(tipX, tipY, tipWidth, tipHeight);
       ctx.fillStyle = "rgba(230, 241, 255, 0.96)";
       ctx.fillText(tip, tipX + paddingX, tipY + 14);
+      ctx.restore();
+    }
+
+    if (zoomStart > 0.001 || zoomEnd < 0.999) {
+      ctx.save();
+      ctx.fillStyle = "rgba(159, 180, 203, 0.15)";
+      ctx.fillRect(axisPadLeft, plotPadTop, plotWidth, 3);
+      ctx.fillStyle = "rgba(64, 212, 144, 0.5)";
+      ctx.fillRect(axisPadLeft + zoomStart * plotWidth, plotPadTop, (zoomEnd - zoomStart) * plotWidth, 3);
       ctx.restore();
     }
   }
@@ -285,6 +318,10 @@ class PidChart {
     this.draw();
   }
 
+  redraw() {
+    this.draw();
+  }
+
   draw() {
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;
@@ -314,17 +351,23 @@ class PidChart {
       { color: "#ffffff", value: (p) => p.relay_on },
     ];
 
+    const n = this.values.length;
+    const visStart = zoomStart * (n - 1);
+    const visEnd = zoomEnd * (n - 1);
+    const iFirst = Math.max(0, Math.floor(visStart));
+    const iLast = Math.min(n - 1, Math.ceil(visEnd));
+    const xForIdx = (i) => axisPadLeft + ((i - visStart) / Math.max(1, visEnd - visStart)) * plotWidth;
     let min = Number.POSITIVE_INFINITY;
     let max = Number.NEGATIVE_INFINITY;
-    this.values.forEach((point) => {
+    for (let i = iFirst; i <= iLast; i++) {
+      const point = this.values[i];
       series.forEach((entry) => {
         const v = entry.value(point);
         if (v < min) min = v;
         if (v > max) max = v;
       });
-    });
+    }
     const spread = Math.max(0.1, max - min);
-    const xStep = plotWidth / (this.values.length - 1);
     const yFor = (v) => {
       const norm = (v - min) / spread;
       return height - plotPadBottom - norm * plotHeight;
@@ -357,32 +400,42 @@ class PidChart {
     const elapsedSeconds = this.elapsedSeconds ?? ((this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS);
     ctx.save();
     ctx.textAlign = "right";
-    ctx.fillText(`T+${formatElapsed(elapsedSeconds)}`, width - 4, height - 2);
+    ctx.fillText(`T+${formatElapsed(Math.round(elapsedSeconds * zoomEnd))}`, width - 4, height - 2);
+    if (zoomStart > 0.001) {
+      ctx.textAlign = "left";
+      ctx.fillText(`T+${formatElapsed(Math.round(elapsedSeconds * zoomStart))}`, axisPadLeft + 4, height - 2);
+    }
     ctx.restore();
 
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
+    ctx.clip();
     series.forEach((entry, idx) => {
       ctx.beginPath();
       ctx.lineWidth = idx === series.length - 1 ? 1.2 : 1.8;
       ctx.strokeStyle = entry.color;
-      this.values.forEach((point, i) => {
-        const x = axisPadLeft + i * xStep;
-        const y = yFor(entry.value(point));
-        if (i === 0) {
+      for (let i = iFirst; i <= iLast; i++) {
+        const x = xForIdx(i);
+        const y = yFor(entry.value(this.values[i]));
+        if (i === iFirst) {
           ctx.moveTo(x, y);
         } else {
           ctx.lineTo(x, y);
         }
-      });
+      }
       ctx.stroke();
     });
+    ctx.restore();
 
     if (this.hoverX !== null && this.values.length > 0) {
       const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this.hoverX));
       const ratio = (clampedX - axisPadLeft) / plotWidth;
-      const i = Math.round(ratio * (this.values.length - 1));
+      const i = Math.max(0, Math.min(n - 1, Math.round(visStart + ratio * (visEnd - visStart))));
       const sample = this.values[i];
       const x = clampedX;
-      const tip1 = `T+${formatElapsed(Math.round(ratio * elapsedSeconds))}`;
+      const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
+      const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
       const tip2 = `t:${sample.target_c.toFixed(1)} kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
       const tip3 = `out:${sample.output_percent.toFixed(1)} win:${sample.window_step} on:${sample.on_steps} r:${sample.relay_on}`;
 
@@ -411,6 +464,15 @@ class PidChart {
       ctx.fillText(tip1, tipX + paddingX, tipY + 14);
       ctx.fillText(tip2, tipX + paddingX, tipY + 28);
       ctx.fillText(tip3, tipX + paddingX, tipY + 42);
+      ctx.restore();
+    }
+
+    if (zoomStart > 0.001 || zoomEnd < 0.999) {
+      ctx.save();
+      ctx.fillStyle = "rgba(159, 180, 203, 0.15)";
+      ctx.fillRect(axisPadLeft, plotPadTop, plotWidth, 3);
+      ctx.fillStyle = "rgba(64, 212, 144, 0.5)";
+      ctx.fillRect(axisPadLeft + zoomStart * plotWidth, plotPadTop, (zoomEnd - zoomStart) * plotWidth, 3);
       ctx.restore();
     }
   }
@@ -689,6 +751,48 @@ const start = () => {
   pidCanvas.addEventListener("mouseleave", () => {
     sparkline.setHoverRatio(null);
   });
+
+  const applyZoom = (pivotRatio, factor) => {
+    const span = zoomEnd - zoomStart;
+    const newSpan = Math.max(0.02, Math.min(1, span * factor));
+    const center = zoomStart + pivotRatio * span;
+    zoomStart = Math.max(0, center - pivotRatio * newSpan);
+    zoomEnd = zoomStart + newSpan;
+    if (zoomEnd > 1) { zoomEnd = 1; zoomStart = Math.max(0, 1 - newSpan); }
+    sparkline.redraw();
+    pidChart.redraw();
+  };
+
+  const applyPan = (delta) => {
+    const span = zoomEnd - zoomStart;
+    const newStart = Math.max(0, Math.min(1 - span, zoomStart + delta * span));
+    zoomStart = newStart;
+    zoomEnd = newStart + span;
+    sparkline.redraw();
+    pidChart.redraw();
+  };
+
+  const onWheelZoom = (canvas, e) => {
+    e.preventDefault();
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) * 0.3) {
+      applyPan(e.deltaX / 800);
+    } else if (e.deltaY !== 0) {
+      const ratio = hoverRatioForClientX(canvas, e.clientX);
+      applyZoom(ratio, e.deltaY > 0 ? 1.25 : 0.8);
+    }
+  };
+
+  const resetZoom = () => {
+    zoomStart = 0;
+    zoomEnd = 1;
+    sparkline.redraw();
+    pidChart.redraw();
+  };
+
+  chart.addEventListener("wheel", (e) => onWheelZoom(chart, e), { passive: false });
+  pidCanvas.addEventListener("wheel", (e) => onWheelZoom(pidCanvas, e), { passive: false });
+  chart.addEventListener("dblclick", resetZoom);
+  pidCanvas.addEventListener("dblclick", resetZoom);
 
   const targetInput = byId("target-input");
   const targetSubmit = byId("target-submit");

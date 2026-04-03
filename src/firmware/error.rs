@@ -89,13 +89,19 @@ mod tests {
     fn sensor_to_firmware_error() {
         let sensor_err = SensorError::BusStuckLow;
         let fw_err: FirmwareError = sensor_err.into();
-        assert!(matches!(fw_err, FirmwareError::Sensor(SensorError::BusStuckLow)));
+        assert!(matches!(
+            fw_err,
+            FirmwareError::Sensor(SensorError::BusStuckLow)
+        ));
     }
 
     #[test]
     fn storage_to_firmware_error() {
         let storage_err = StorageError::NotInitialized;
         let fw_err: FirmwareError = storage_err.into();
-        assert!(matches!(fw_err, FirmwareError::Storage(StorageError::NotInitialized)));
+        assert!(matches!(
+            fw_err,
+            FirmwareError::Storage(StorageError::NotInitialized)
+        ));
     }
 }
