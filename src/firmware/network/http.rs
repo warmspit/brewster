@@ -196,6 +196,18 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 letter-spacing: 0.08em;
             }
 
+            .chart-title {
+                position: relative;
+                text-align: left;
+            }
+
+            .chart-title-center {
+                position: absolute;
+                left: 50%;
+                transform: translateX(-50%);
+                white-space: nowrap;
+            }
+
             .kpi-value {
                 margin-top: 6px;
                 font-size: clamp(1.5rem, 3vw, 2.4rem);
@@ -274,7 +286,7 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
 
             .chart {
                 width: 100%;
-                height: 172px;
+                height: 220px;
                 border-radius: 10px;
                 background: rgba(8, 15, 25, 0.72);
                 border: 1px solid rgba(130, 184, 235, 0.14);
@@ -381,17 +393,6 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 </article>
 
                 <article class="card">
-                    <div class="kpi-title">Sensor + Loop</div>
-                    <div class="rows">
-                        <div class="row"><span>Probe</span><strong id="probe">--</strong></div>
-                        <div class="row"><span>Sensor status</span><strong id="sensor-status">--</strong></div>
-                        <div class="row"><span>Window step</span><strong id="window-step">--</strong></div>
-                        <div class="row"><span>On steps</span><strong id="on-steps">--</strong></div>
-                        <div class="row"><span>Uptime</span><strong id="uptime">--</strong></div>
-                    </div>
-                </article>
-
-                <article class="card">
                     <div class="kpi-title">Network</div>
                     <div class="kpi-value" id="ip">--</div>
                     <div class="kpi-sub"><span id="ntp-pill" class="status-pill status-warn">NTP pending</span></div>
@@ -399,13 +400,13 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 </div>
 
                 <article class="card span-12">
-                    <div class="kpi-title">Temperature Trend (live)</div>
-                    <canvas id="temp-chart" class="chart" width="1120" height="172"></canvas>
+                    <div class="kpi-title chart-title">Temperature Trend (live)<span class="chart-title-center" id="temp-chart-probe">--</span></div>
+                    <canvas id="temp-chart" class="chart" width="1120" height="220"></canvas>
                 </article>
 
                 <article class="card span-12">
-                    <div class="kpi-title">PID Trend (all parameters)</div>
-                    <canvas id="pid-chart" class="chart" width="1120" height="172"></canvas>
+                    <div class="kpi-title chart-title">PID Trend (all parameters)<span class="chart-title-center" id="pid-chart-probe">--</span></div>
+                    <canvas id="pid-chart" class="chart" width="1120" height="220"></canvas>
                     <div class="legend">
                         <span class="legend-item"><span class="legend-dot" style="background:#f7d774"></span>target_c</span>
                         <span class="legend-item"><span class="legend-dot" style="background:#6ec5ff"></span>kp</span>

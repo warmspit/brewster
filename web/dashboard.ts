@@ -152,11 +152,6 @@ class Sparkline {
     }
   }
 
-  push(value: number): void {
-    this.values.push(value);
-    this.draw();
-  }
-
   clear(): void {
     this.values.length = 0;
     this.draw();
@@ -217,6 +212,7 @@ class Sparkline {
     const tickValues = [max, min + spread / 2, min];
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
+    ctx.textAlign = "right";
     tickValues.forEach((tickValue) => {
       const y = yFor(tickValue);
       ctx.strokeStyle = axisColor;
@@ -224,8 +220,9 @@ class Sparkline {
       ctx.moveTo(axisPadLeft, y);
       ctx.lineTo(width - 4, y);
       ctx.stroke();
-      ctx.fillText(`${tickValue.toFixed(1)} C`, 2, y + 4);
+      ctx.fillText(`${tickValue.toFixed(1)}°C`, axisPadLeft - 4, y + 4);
     });
+    ctx.textAlign = "left";
 
     // X-axis baseline + cumulative elapsed label at far right.
     ctx.beginPath();
@@ -325,6 +322,17 @@ class PidChart {
   private hoverX: number | null = null;
   private elapsedSeconds: number | null = null;
 
+  private static signedOutput(sample: PidSample): number {
+    if (sample.output_percent <= 0) {
+      return 0;
+    }
+    return -Math.max(0, Math.min(1, sample.output_percent / 100));
+  }
+
+  private static signedRelay(sample: PidSample): number {
+    return sample.relay_on ? -1 : 0;
+  }
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.canvas.addEventListener("mousemove", (event: MouseEvent) => {
@@ -402,20 +410,23 @@ class PidChart {
     }
 
     const axisPadLeft = 46;
+    const axisPadRight = 24;
     const plotPadTop = 8;
     const plotPadBottom = 8;
-    const plotWidth = Math.max(1, width - axisPadLeft - 6);
+    const plotWidth = Math.max(1, width - axisPadLeft - axisPadRight);
     const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
 
-    const series = [
+    const leftSeries = [
       { color: "#f7d774", value: (p: PidSample) => p.target_c },
       { color: "#6ec5ff", value: (p: PidSample) => p.kp },
       { color: "#8ef0c8", value: (p: PidSample) => p.ki },
       { color: "#b28cff", value: (p: PidSample) => p.kd },
-      { color: "#ff8d6e", value: (p: PidSample) => p.output_percent },
       { color: "#7cf3ff", value: (p: PidSample) => p.window_step },
       { color: "#ffb3d1", value: (p: PidSample) => p.on_steps },
-      { color: "#ffffff", value: (p: PidSample) => p.relay_on },
+    ];
+    const rightSeries = [
+      { color: "#ff8d6e", value: (p: PidSample) => PidChart.signedOutput(p) },
+      { color: "#ffffff", value: (p: PidSample) => PidChart.signedRelay(p) },
     ];
 
     const n = this.values.length;
@@ -424,19 +435,26 @@ class PidChart {
     const iFirst = Math.max(0, Math.floor(visStart));
     const iLast = Math.min(n - 1, Math.ceil(visEnd));
     const xForIdx = (i: number) => axisPadLeft + ((i - visStart) / Math.max(1, visEnd - visStart)) * plotWidth;
-    let min = Number.POSITIVE_INFINITY;
-    let max = Number.NEGATIVE_INFINITY;
+    let leftMin = Number.POSITIVE_INFINITY;
+    let leftMax = Number.NEGATIVE_INFINITY;
     for (let i = iFirst; i <= iLast; i++) {
       const point = this.values[i];
-      series.forEach((entry) => {
+      leftSeries.forEach((entry) => {
         const v = entry.value(point);
-        if (v < min) min = v;
-        if (v > max) max = v;
+        if (v < leftMin) leftMin = v;
+        if (v > leftMax) leftMax = v;
       });
     }
-    const spread = Math.max(0.1, max - min);
-    const yFor = (v: number) => {
-      const norm = (v - min) / spread;
+    const leftSpread = Math.max(0.1, leftMax - leftMin);
+    const yForLeft = (v: number) => {
+      const norm = (v - leftMin) / leftSpread;
+      return height - plotPadBottom - norm * plotHeight;
+    };
+    const rightMin = -1;
+    const rightMax = 1;
+    const rightSpread = rightMax - rightMin;
+    const yForRight = (v: number) => {
+      const norm = (v - rightMin) / rightSpread;
       return height - plotPadBottom - norm * plotHeight;
     };
 
@@ -448,26 +466,51 @@ class PidChart {
     ctx.lineTo(axisPadLeft, height - plotPadBottom);
     ctx.stroke();
 
-    const tickValues = [max, min + spread / 2, min];
+    ctx.beginPath();
+    ctx.moveTo(width - axisPadRight, plotPadTop);
+    ctx.lineTo(width - axisPadRight, height - plotPadBottom);
+    ctx.stroke();
+
+    const leftTickValues = [leftMax, leftMin + leftSpread / 2, leftMin];
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
-    tickValues.forEach((tickValue) => {
-      const y = yFor(tickValue);
+    ctx.textAlign = "right";
+    leftTickValues.forEach((tickValue) => {
+      const y = yForLeft(tickValue);
       ctx.beginPath();
       ctx.moveTo(axisPadLeft, y);
-      ctx.lineTo(width - 4, y);
+      ctx.lineTo(width - axisPadRight, y);
       ctx.stroke();
-      ctx.fillText(tickValue.toFixed(1), 2, y + 4);
+      ctx.fillText(`${tickValue.toFixed(1)}°C`, axisPadLeft - 4, y + 4);
+    });
+
+    const rightTicks = [
+      { value: 1, label: "+1" },
+      { value: 0, label: "0" },
+      { value: -1, label: "-1" },
+    ];
+    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "right";
+    rightTicks.forEach((tick) => {
+      const y = yForRight(tick.value);
+      ctx.beginPath();
+      ctx.moveTo(width - axisPadRight, y);
+      ctx.lineTo(width - axisPadRight + 6, y);
+      ctx.stroke();
+      ctx.fillText(tick.label, width - 2, y + 4);
     });
 
     ctx.beginPath();
     ctx.moveTo(axisPadLeft, height - plotPadBottom);
-    ctx.lineTo(width - 4, height - plotPadBottom);
+    ctx.lineTo(width - axisPadRight, height - plotPadBottom);
     ctx.stroke();
     const elapsedSeconds = this.elapsedSeconds ?? ((this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS);
     ctx.save();
+    ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
+    ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.textAlign = "right";
-    ctx.fillText(`T+${formatElapsed(Math.round(elapsedSeconds * zoomEnd))}`, width - 4, height - 2);
+    ctx.fillText(`T+${formatElapsed(Math.round(elapsedSeconds * zoomEnd))}`, width - axisPadRight, height - 2);
     if (zoomStart > 0.001) {
       ctx.textAlign = "left";
       ctx.fillText(`T+${formatElapsed(Math.round(elapsedSeconds * zoomStart))}`, axisPadLeft + 4, height - 2);
@@ -478,17 +521,37 @@ class PidChart {
     ctx.beginPath();
     ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
     ctx.clip();
-    series.forEach((entry, idx) => {
+    leftSeries.forEach((entry, idx) => {
       ctx.beginPath();
-      ctx.lineWidth = idx === series.length - 1 ? 1.2 : 1.8;
+      ctx.lineWidth = 1.8;
       ctx.strokeStyle = entry.color;
       for (let i = iFirst; i <= iLast; i++) {
         const x = xForIdx(i);
-        const y = yFor(entry.value(this.values[i]));
+        const y = yForLeft(entry.value(this.values[i]));
         if (i === iFirst) {
           ctx.moveTo(x, y);
         } else {
           ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    });
+    rightSeries.forEach((entry, idx) => {
+      ctx.beginPath();
+      ctx.lineWidth = idx === rightSeries.length - 1 ? 1.2 : 1.8;
+      ctx.strokeStyle = entry.color;
+      for (let i = iFirst; i <= iLast; i++) {
+        const x = xForIdx(i);
+        const y = yForRight(entry.value(this.values[i]));
+        if (i === iFirst) {
+          ctx.moveTo(x, y);
+        } else {
+          if (idx === rightSeries.length - 1) {
+            ctx.lineTo(x, yForRight(entry.value(this.values[i - 1])));
+            ctx.lineTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
         }
       }
       ctx.stroke();
@@ -502,11 +565,14 @@ class PidChart {
       const sample = this.values[i];
       const x = clampedX;
       const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
+      const signedOutput = PidChart.signedOutput(sample);
+      const relayMode = sample.relay_on ? "cool" : "off";
       const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
       const tip2 = `t:${sample.target_c.toFixed(1)} kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
-      const tip3 = `out:${sample.output_percent.toFixed(1)} win:${sample.window_step} on:${sample.on_steps} r:${sample.relay_on}`;
+      const tip3 = `drv:${signedOutput.toFixed(2)} win:${sample.window_step} on:${sample.on_steps} r:${relayMode}`;
 
       ctx.save();
+      ctx.textAlign = "left";
       ctx.strokeStyle = "rgba(255,255,255,0.35)";
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -737,6 +803,10 @@ const updateFromStatus = (data: StatusPayload, sparkline: Sparkline, pidChart: P
   setText("temp", formatTemp(data.sensor.ds18b20.temperature_c, "C"));
   setText("temp-secondary", formatTemp(data.sensor.ds18b20.temperature_f, "F"));
 
+  const probeName = data.sensor.ds18b20.name || "";
+  setText("temp-chart-probe", probeName || "--");
+  setText("pid-chart-probe", probeName || "--");
+
   if (collecting && data.sensor.ds18b20.temperature_c !== null) {
     sparkline.push(data.sensor.ds18b20.temperature_c);
   }
@@ -767,12 +837,6 @@ const updateFromStatus = (data: StatusPayload, sparkline: Sparkline, pidChart: P
 
   setText("ip", data.system.ip || "--");
   updateNtpPill(data.system.ntp.synced);
-
-  setText("probe", data.sensor.ds18b20.name || "--");
-  setText("sensor-status", data.sensor.ds18b20.error || "none");
-  setText("window-step", String(data.pid.window_step));
-  setText("on-steps", String(data.pid.on_steps));
-  setText("uptime", formatUptime(data.system.uptime_s));
 
 };
 
