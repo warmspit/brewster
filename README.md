@@ -116,16 +116,29 @@ The HTTP server listens on port `80`.
 Supported routes:
 
 - `GET /`
+- `GET /panel`
 - `GET /dashboard.js`
 - `GET /status`
+- `GET /history?points=<N>`
 - `GET /metrics`
 - `POST /temperature`
 - `POST /probe-name`
+- `POST /collection/start`
+- `POST /collection/stop`
+- `POST /history/clear`
 
 `GET /` serves the built-in Grafana-style dashboard UI.
 
 The dashboard polls `GET /status` for live data and visualizes temperature, PID output,
 relay state, system health, and NTP master stats.
+
+Dashboard interactions:
+
+- hover either chart to show synchronized crosshair/tooltip on both charts
+- mouse wheel to zoom time axis in/out around cursor position
+- two-finger horizontal scroll/trackpad pan to move across the zoomed window
+- double-click either chart to reset zoom to full history
+- menu controls to start/stop collection and clear persisted history
 
 `GET /status` returns the raw JSON status document used by the dashboard.
 
@@ -149,7 +162,21 @@ curl -X POST http://brewster.local/temperature \
   -d '{"temperature_c": 21.5}'
 ```
 
-Accepted temperature range is `0.0..=150.0` degrees C.
+Accepted temperature range is `-20.0..=25.0` degrees C.
+
+To start or stop data collection:
+
+```sh
+curl -X POST http://brewster.local/collection/start
+curl -X POST http://brewster.local/collection/stop
+```
+
+To fetch or clear persisted history:
+
+```sh
+curl 'http://brewster.local/history?points=2000'
+curl -X POST http://brewster.local/history/clear
+```
 
 To set a probe name:
 
@@ -331,7 +358,7 @@ src/firmware/network.rs   Wi-Fi, mDNS, HTTP, and NTP tasks
 src/firmware/status.rs    Shared runtime state, JSON/text status, persistence
 src/firmware/shared.rs    Shared utility functions
 web/dashboard.ts          Dashboard source (TypeScript)
-web/dashboard.js          Dashboard runtime script served by firmware
+web/dashboard.js          Dashboard runtime script served by firmware (embedded by `include_str!`)
 build.rs                  Build-time env injection and linker diagnostics
 ```
 
