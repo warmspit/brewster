@@ -543,8 +543,8 @@ enum ParsedRequest {
 }
 
 fn parse_history_points(buf: &[u8]) -> usize {
-    const DEFAULT_POINTS: usize = 2000;
-    const MAX_POINTS: usize = 5000;
+    const DEFAULT_POINTS: usize = 400;
+    const MAX_POINTS: usize = 1000;
 
     let line_end = match buf.windows(2).position(|w| w == b"\r\n") {
         Some(i) => i,

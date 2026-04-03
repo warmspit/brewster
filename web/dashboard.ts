@@ -3,7 +3,7 @@ export {};
 type NullableNumber = number | null;
 
 const TREND_SAMPLE_INTERVAL_SECONDS = 2;
-const HISTORY_FETCH_POINTS = 2000;
+const HISTORY_FETCH_POINTS = 400;
 let lastHistorySeq = -1;
 let collecting = false;
 let syncCollectingUi: ((value: boolean) => void) | null = null;
@@ -11,6 +11,7 @@ let collectionToggleInFlight = false;
 let pollRequestInFlight = false;
 let zoomStart = 0;
 let zoomEnd = 1;
+let loadedHistoryBaseSeconds = 0;
 const NO_DATA_FONT = "700 20px 'Avenir Next', 'Trebuchet MS', sans-serif";
 
 const delayMs = (ms: number): Promise<void> => new Promise((resolve) => {
@@ -660,8 +661,16 @@ const loadHistoryFromDevice = async (sparkline: Sparkline, pidChart: PidChart): 
     lastHistorySeq = Number(point[0]);
   });
 
+  const sampleIntervalS =
+    Number.isFinite(Number(payload.sample_interval_s)) && Number(payload.sample_interval_s) > 0
+      ? Number(payload.sample_interval_s)
+      : TREND_SAMPLE_INTERVAL_SECONDS;
+  loadedHistoryBaseSeconds = Math.max(0, tempValues.length - 1) * sampleIntervalS;
+
   sparkline.setValues(tempValues);
   pidChart.setValues(pidValues);
+  sparkline.setElapsedSeconds(loadedHistoryBaseSeconds);
+  pidChart.setElapsedSeconds(loadedHistoryBaseSeconds);
 };
 
 const mergeHistoryFromDevice = async (sparkline: Sparkline, pidChart: PidChart): Promise<void> => {
@@ -717,8 +726,9 @@ const updateFromStatus = (data: StatusPayload, sparkline: Sparkline, pidChart: P
 
   lastUptimeSeconds = data.system.uptime_s;
   if (collecting) {
-    sparkline.setElapsedSeconds(data.system.uptime_s);
-    pidChart.setElapsedSeconds(data.system.uptime_s);
+    const totalElapsed = loadedHistoryBaseSeconds + data.system.uptime_s;
+    sparkline.setElapsedSeconds(totalElapsed);
+    pidChart.setElapsedSeconds(totalElapsed);
   }
 
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
