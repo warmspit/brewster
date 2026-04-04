@@ -48,7 +48,7 @@ static MDNS_SEND_PACKET: ConstStaticCell<[u8; 512]> = ConstStaticCell::new([0; 5
 pub fn configure_wifi(spawner: &Spawner, wifi: WIFI<'static>, hostname: &str) {
     let Some(ssid) = option_env!("SSID").filter(|ssid| !ssid.is_empty()) else {
         esp_println::println!(
-            "wifi: disabled, set SSID and PASSWORD in .cargo/config.local.toml [env]"
+            "wifi: disabled, set SSID and PASSWORD in config.local.toml [env]"
         );
         return;
     };

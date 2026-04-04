@@ -73,6 +73,13 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 font-size: 0.95rem;
             }
 
+            .headline .meta-row {
+                display: flex;
+                align-items: baseline;
+                gap: 12px;
+                white-space: nowrap;
+            }
+
             .menu-wrap {
                 position: relative;
                 margin-left: auto;
@@ -198,13 +205,18 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
 
             .chart-title {
                 position: relative;
-                text-align: left;
+                text-align: center;
+            }
+
+            .chart-title-left {
+                position: absolute;
+                left: 0;
+                top: 0;
+                white-space: nowrap;
             }
 
             .chart-title-center {
-                position: absolute;
-                left: 50%;
-                transform: translateX(-50%);
+                display: block;
                 white-space: nowrap;
             }
 
@@ -348,7 +360,10 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
         <main class="dashboard">
             <header class="headline">
                 <h1 id="title">__HOSTNAME__ CONTROL PANEL</h1>
-                <div class="meta" id="updated">Waiting for data...</div>
+                <div class="meta-row">
+                    <div class="meta" id="updated">Waiting for data...</div>
+                    <div class="meta" id="uptime">Uptime: --</div>
+                </div>
                 <div class="menu-wrap">
                     <button class="menu-btn" id="menu-btn" aria-label="Menu" aria-expanded="false">&#9776;</button>
                     <div class="menu-dropdown" id="menu-dropdown" role="menu">
@@ -400,13 +415,19 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
                 </div>
 
                 <article class="card span-12">
-                    <div class="kpi-title chart-title">Temperature Trend (live)<span class="chart-title-center" id="temp-chart-probe">--</span></div>
-                    <canvas id="temp-chart" class="chart" width="1120" height="220"></canvas>
+                    <div class="kpi-title chart-title">
+                        <span class="chart-title-left" id="temp-chart-probe-0">--</span>
+                        <span class="chart-title-center">Temperature Trend (live)</span>
+                    </div>
+                    <canvas id="temp-chart-0" class="chart" width="1120" height="220"></canvas>
                 </article>
 
                 <article class="card span-12">
-                    <div class="kpi-title chart-title">PID Trend (all parameters)<span class="chart-title-center" id="pid-chart-probe">--</span></div>
-                    <canvas id="pid-chart" class="chart" width="1120" height="220"></canvas>
+                    <div class="kpi-title chart-title">
+                        <span class="chart-title-left" id="pid-chart-probe-0">--</span>
+                        <span class="chart-title-center">PID Trend (all parameters)</span>
+                    </div>
+                    <canvas id="pid-chart-0" class="chart" width="1120" height="220"></canvas>
                     <div class="legend">
                         <span class="legend-item"><span class="legend-dot" style="background:#f7d774"></span>target_c</span>
                         <span class="legend-item"><span class="legend-dot" style="background:#6ec5ff"></span>kp</span>
@@ -428,8 +449,13 @@ const DASHBOARD_HTML_TEMPLATE: &str = r#"<!doctype html>
 "#;
 
 const DASHBOARD_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/dashboard.js"));
+const CHARTS_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/charts.js"));
+const API_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/api.js"));
+const UI_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/ui.js"));
 
 fn dashboard_html() -> alloc::string::String {
+    // Single replacement for hostname keeps memory usage minimal
+    // on the device's constrained ~55KB heap.
     let hostname = crate::device_hostname().to_ascii_uppercase();
     DASHBOARD_HTML_TEMPLATE.replace("__HOSTNAME__", &hostname)
 }
@@ -496,12 +522,14 @@ fn collection_ok_json(enabled: bool) -> alloc::string::String {
 }
 
 fn parse_json_string_field(body: &str, key: &str) -> Option<alloc::string::String> {
-    let mut pattern = alloc::string::String::with_capacity(key.len() + 2);
-    pattern.push('"');
-    pattern.push_str(key);
-    pattern.push('"');
-    let key_pos = body.find(&pattern)?;
-    let after_key = &body[key_pos + pattern.len()..];
+    // Scan for `"<key>"` without allocating a pattern String.
+    let body_bytes = body.as_bytes();
+    let key_bytes = key.as_bytes();
+    let needle_len = key_bytes.len() + 2; // opening `"` + key + closing `"`
+    let key_pos = body_bytes.windows(needle_len).position(|w| {
+        w[0] == b'"' && w[1..needle_len - 1] == *key_bytes && w[needle_len - 1] == b'"'
+    })?;
+    let after_key = &body[key_pos + needle_len..];
     let colon_pos = after_key.find(':')?;
     let mut value = after_key[colon_pos + 1..].trim_start();
     if !value.starts_with('"') {
@@ -532,6 +560,9 @@ fn parse_probe_name(buf: &[u8]) -> Option<alloc::string::String> {
 enum ParsedRequest {
     GetDashboard,
     GetDashboardScript,
+    GetChartsScript,
+    GetApiScript,
+    GetUiScript,
     GetStatus,
     GetHistory(usize),
     GetMetrics,
@@ -570,12 +601,37 @@ fn parse_history_points(buf: &[u8]) -> usize {
     DEFAULT_POINTS
 }
 
+#[allow(
+    clippy::large_stack_frames,
+    reason = "parse_request holds ParsedRequest variants on the stack; the enum is unavoidably large because PostProbeName carries a heap-allocated String"
+)]
 fn parse_request(buf: &[u8]) -> ParsedRequest {
     if buf.starts_with(b"GET /dashboard.js ")
         || buf.starts_with(b"GET /dashboard.js?")
         || buf.starts_with(b"GET /dashboard.js\r")
     {
         return ParsedRequest::GetDashboardScript;
+    }
+
+    if buf.starts_with(b"GET /charts.js ")
+        || buf.starts_with(b"GET /charts.js?")
+        || buf.starts_with(b"GET /charts.js\r")
+    {
+        return ParsedRequest::GetChartsScript;
+    }
+
+    if buf.starts_with(b"GET /api.js ")
+        || buf.starts_with(b"GET /api.js?")
+        || buf.starts_with(b"GET /api.js\r")
+    {
+        return ParsedRequest::GetApiScript;
+    }
+
+    if buf.starts_with(b"GET /ui.js ")
+        || buf.starts_with(b"GET /ui.js?")
+        || buf.starts_with(b"GET /ui.js\r")
+    {
+        return ParsedRequest::GetUiScript;
     }
 
     if buf.starts_with(b"GET /panel ")
@@ -772,6 +828,33 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                     "application/javascript; charset=utf-8",
                     "no-store",
                     ResponseBody::Static(DASHBOARD_JS),
+                )
+            }
+            ParsedRequest::GetChartsScript => {
+                println!("http: serving charts script to {:?}", remote);
+                (
+                    "200 OK",
+                    "application/javascript; charset=utf-8",
+                    "no-store",
+                    ResponseBody::Static(CHARTS_JS),
+                )
+            }
+            ParsedRequest::GetApiScript => {
+                println!("http: serving api script to {:?}", remote);
+                (
+                    "200 OK",
+                    "application/javascript; charset=utf-8",
+                    "no-store",
+                    ResponseBody::Static(API_JS),
+                )
+            }
+            ParsedRequest::GetUiScript => {
+                println!("http: serving ui script to {:?}", remote);
+                (
+                    "200 OK",
+                    "application/javascript; charset=utf-8",
+                    "no-store",
+                    ResponseBody::Static(UI_JS),
                 )
             }
             ParsedRequest::GetStatus => {

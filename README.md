@@ -239,10 +239,16 @@ Configured peers are preferred over the DHCP gateway, and the sync task keeps pe
 
 ## Configuration
 
-Build-time configuration is taken from `.cargo/config.local.toml`.
+Build-time configuration is taken from `config.local.toml` at the repository root.
 That file is intentionally ignored by git and is read by `build.rs`, which injects selected values into the firmware via `cargo:rustc-env`.
 
-Create `.cargo/config.local.toml` with values like:
+Start from the tracked example and keep real credentials only in your local file:
+
+```sh
+cp config.local.toml.example config.local.toml
+```
+
+Edit `config.local.toml` with values like:
 
 ```toml
 [env]
@@ -251,10 +257,16 @@ PASSWORD = "your-password"
 DEVICE_HOSTNAME = "brewster"
 WIFI_SCAN_EVERY_ATTEMPTS = "6"
 STATUS_PRINT_EVERY_SECONDS = "5"
-TEMP_PROBE_NAME = "probe-1"
 NTP_SERVERS = "129.6.15.28,194.58.204.20"
 # Optional fallback when NTP_SERVERS is empty or invalid
 NTP_SERVER = "8.8.8.8"
+
+[device]
+hostname = "brewster"
+
+[[sensors]]
+pin = 5
+name = "probe-1"
 ```
 
 Supported keys:
@@ -264,9 +276,24 @@ Supported keys:
 - `DEVICE_HOSTNAME`: advertised hostname and DHCP hostname base
 - `WIFI_SCAN_EVERY_ATTEMPTS`: how often failed connection retries trigger a Wi-Fi scan
 - `STATUS_PRINT_EVERY_SECONDS`: serial console status print interval
-- `TEMP_PROBE_NAME`: default DS18B20 probe name at boot
 - `NTP_SERVERS`: comma-separated IPv4 NTP server list
 - `NTP_SERVER`: single IPv4 fallback NTP server
+
+Probe configuration keys:
+
+- `[device].hostname`: dashboard and network display hostname
+- `[[sensors]].pin`: GPIO pin for a DS18B20 probe
+- `[[sensors]].name`: human-readable probe name shown in status/dashboard
+
+To add another probe, append another `[[sensors]]` block:
+
+```toml
+[[sensors]]
+pin = 6
+name = "probe-2"
+```
+
+Current firmware behavior: PID control uses the first sensor in the list (`[[sensors]]` block #1). Additional sensors are exposed as extra readings.
 
 ## Toolchain And Build Setup
 
@@ -391,7 +418,7 @@ The serial console prints a compact text version of the same operational state a
 
 ## Typical Workflow
 
-1. Create `.cargo/config.local.toml` with Wi-Fi and hostname values.
+1. Create `config.local.toml` with Wi-Fi, hostname, and sensor values.
 2. Load the ESP toolchain environment with `. ~/export-esp.sh`.
 3. Run `cargo check`.
 4. Run `cargo run` to flash and monitor the device.

@@ -1,22 +1,19 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 David Bannister
 
-use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, Ordering};
 use critical_section::Mutex;
-use embedded_storage::nor_flash::NorFlash;
-use embedded_storage::{ReadStorage, Storage};
-use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
-use esp_hal::peripherals::FLASH;
-use esp_storage::FlashStorage;
-use static_cell::ConstStaticCell;
 
 use super::error::SensorError;
-use super::{error, shared};
+use super::shared;
 
-// Type alias for backward compatibility; PersistError is now StorageError from error.rs
-pub use error::StorageError as PersistError;
+// Re-export items from storage so existing callers are unaffected.
+pub use super::storage::{
+    ProbeNameError, RuntimeSample, TEMP_PROBE_NAME_MAX_LEN, clear_history_persistent,
+    get_target_temp_c, history_sample_interval_secs, history_snapshot, history_total_samples,
+    init_persistent_target, set_target_temp_c_persistent, set_temp_probe_name, temp_probe_name,
+};
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
@@ -62,32 +59,45 @@ pub fn sensor_status_label(code: u8) -> &'static str {
 }
 
 pub fn runtime_error_active() -> bool {
-    LAST_SENSOR_STATUS.load(Ordering::Relaxed) != SensorStatus::None as u8
+    // Check if the primary sensor (index 0) has an error
+    LAST_SENSOR_STATUS[0].load(Ordering::Relaxed) != SensorStatus::None as u8
 }
 
-const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
-const TARGET_TEMP_MIN_CENTI: i32 = -2_000;
-const TARGET_TEMP_MAX_CENTI: i32 = 2_500;
-pub const TEMP_PROBE_NAME_MAX_LEN: usize = 32;
-const TARGET_STORE_MAGIC: [u8; 4] = *b"BRWT";
-const TARGET_STORE_VERSION: u8 = 1;
-const TARGET_STORE_SIZE: usize = 9;
-const TARGET_PARTITION_LABEL: &str = "cfg";
-const HISTORY_RECORD_SIZE: u32 = 16;
-const HISTORY_DATA_OFFSET: u32 = 0x1000;
-const HISTORY_SECTOR_SIZE: u32 = 0x1000;
-const HISTORY_SAMPLE_INTERVAL_SECS: u32 = 60;
-
-#[derive(Clone, Copy)]
-pub struct HistorySample {
-    pub seq: u32,
-    pub temp_c: f32,
-    pub target_c: f32,
-    pub output_percent: f32,
-    pub window_step: u8,
-    pub on_steps: u8,
-    pub relay_on: bool,
+/// Get the number of configured sensors
+pub fn sensor_count() -> usize {
+    super::config::SENSORS.len()
 }
+
+/// Get the primary (first) sensor temperature in centidegrees
+pub fn primary_temp_centi() -> i32 {
+    LAST_TEMP_CENTI[0].load(Ordering::Relaxed)
+}
+
+/// Get a specific sensor's temperature in centidegrees
+pub fn sensor_temp_centi(index: usize) -> i32 {
+    if index < MAX_SENSORS {
+        LAST_TEMP_CENTI[index].load(Ordering::Relaxed)
+    } else {
+        UNKNOWN_TEMPERATURE_CENTI
+    }
+}
+
+/// Get the primary sensor's status code
+pub fn primary_sensor_status() -> u8 {
+    LAST_SENSOR_STATUS[0].load(Ordering::Relaxed)
+}
+
+/// Get a specific sensor's status code
+pub fn sensor_status(index: usize) -> u8 {
+    if index < MAX_SENSORS {
+        LAST_SENSOR_STATUS[index].load(Ordering::Relaxed)
+    } else {
+        SensorStatus::NoDevice as u8
+    }
+}
+
+pub const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
+
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum NetState {
@@ -109,11 +119,30 @@ impl NetState {
 }
 
 const NTP_MAX_TRACKED_PEERS: usize = shared::NTP_MAX_CONFIG_SERVERS + 1;
+pub const MAX_SENSORS: usize = 8;
 
-static LAST_TEMP_CENTI: AtomicI32 = AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI);
+static LAST_TEMP_CENTI: [AtomicI32; MAX_SENSORS] = [
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+];
 static LAST_PID_OUTPUT_DECI_PERCENT: AtomicU16 = AtomicU16::new(0);
 static LAST_RELAY_ON: AtomicBool = AtomicBool::new(false);
-static LAST_SENSOR_STATUS: AtomicU8 = AtomicU8::new(SensorStatus::NoDevice as u8);
+static LAST_SENSOR_STATUS: [AtomicU8; MAX_SENSORS] = [
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+];
 static LAST_LED_RED: AtomicU8 = AtomicU8::new(0);
 static LAST_LED_GREEN: AtomicU8 = AtomicU8::new(0);
 static LAST_LED_BLUE: AtomicU8 = AtomicU8::new(0);
@@ -138,308 +167,6 @@ static NTP_SERVER_SOURCE: AtomicU8 = AtomicU8::new(0);
 static NTP_SERVER_IP: AtomicU32 = AtomicU32::new(0);
 static NTP_PEERS: Mutex<RefCell<[Option<NtpPeerState>; NTP_MAX_TRACKED_PEERS]>> =
     Mutex::new(RefCell::new([None; NTP_MAX_TRACKED_PEERS]));
-// Runtime-settable target temperature stored as centidegrees (2111 = 21.11°C = 70°F).
-static TARGET_TEMP_CENTI: AtomicI32 = AtomicI32::new(2111);
-static TARGET_STORE_OFFSET: AtomicU32 = AtomicU32::new(0);
-static TARGET_STORE_PARTITION_LEN: AtomicU32 = AtomicU32::new(0);
-static HISTORY_BASE_OFFSET: AtomicU32 = AtomicU32::new(0);
-static HISTORY_CAPACITY: AtomicU32 = AtomicU32::new(0);
-static HISTORY_WRITE_INDEX: AtomicU32 = AtomicU32::new(0);
-static HISTORY_NEXT_SEQ: AtomicU32 = AtomicU32::new(0);
-static HISTORY_COUNT: AtomicU32 = AtomicU32::new(0);
-static HISTORY_LAST_PERSIST_UPTIME_S: AtomicU32 = AtomicU32::new(0);
-static TEMP_PROBE_NAME: Mutex<RefCell<heapless::String<TEMP_PROBE_NAME_MAX_LEN>>> =
-    Mutex::new(RefCell::new(heapless::String::new()));
-static FLASH_STORAGE: Mutex<RefCell<Option<FlashStorage<'static>>>> =
-    Mutex::new(RefCell::new(None));
-static PARTITION_TABLE_BUFFER: ConstStaticCell<[u8; PARTITION_TABLE_MAX_LEN]> =
-    ConstStaticCell::new([0; PARTITION_TABLE_MAX_LEN]);
-
-fn valid_target_centi(target_centi: i32) -> bool {
-    (TARGET_TEMP_MIN_CENTI..=TARGET_TEMP_MAX_CENTI).contains(&target_centi)
-}
-
-fn history_record_valid(raw: &[u8; HISTORY_RECORD_SIZE as usize]) -> bool {
-    u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) != u32::MAX
-}
-
-fn history_record_offset(index: u32) -> u32 {
-    HISTORY_BASE_OFFSET.load(Ordering::Relaxed) + index.saturating_mul(HISTORY_RECORD_SIZE)
-}
-
-fn history_init(storage: &mut FlashStorage<'static>, partition_offset: u32, partition_len: u32) {
-    if partition_len <= HISTORY_DATA_OFFSET + HISTORY_RECORD_SIZE {
-        HISTORY_BASE_OFFSET.store(0, Ordering::Relaxed);
-        HISTORY_CAPACITY.store(0, Ordering::Relaxed);
-        HISTORY_WRITE_INDEX.store(0, Ordering::Relaxed);
-        HISTORY_NEXT_SEQ.store(0, Ordering::Relaxed);
-        HISTORY_COUNT.store(0, Ordering::Relaxed);
-        return;
-    }
-
-    let base = partition_offset + HISTORY_DATA_OFFSET;
-    let capacity = (partition_len - HISTORY_DATA_OFFSET) / HISTORY_RECORD_SIZE;
-    HISTORY_BASE_OFFSET.store(base, Ordering::Relaxed);
-    HISTORY_CAPACITY.store(capacity, Ordering::Relaxed);
-
-    let mut raw = [0u8; HISTORY_RECORD_SIZE as usize];
-    let mut max_seq = 0u32;
-    let mut max_index = 0u32;
-    let mut has_records = false;
-    let mut valid_count = 0u32;
-
-    for index in 0..capacity {
-        let offset = base + index.saturating_mul(HISTORY_RECORD_SIZE);
-        if storage.read(offset, &mut raw).is_err() {
-            continue;
-        }
-        if !history_record_valid(&raw) {
-            continue;
-        }
-        valid_count = valid_count.saturating_add(1);
-        let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-        if !has_records || seq > max_seq {
-            has_records = true;
-            max_seq = seq;
-            max_index = index;
-        }
-    }
-
-    if has_records {
-        HISTORY_WRITE_INDEX.store((max_index + 1) % capacity, Ordering::Relaxed);
-        HISTORY_NEXT_SEQ.store(max_seq.wrapping_add(1), Ordering::Relaxed);
-        HISTORY_COUNT.store(valid_count, Ordering::Relaxed);
-    } else {
-        HISTORY_WRITE_INDEX.store(0, Ordering::Relaxed);
-        HISTORY_NEXT_SEQ.store(0, Ordering::Relaxed);
-        HISTORY_COUNT.store(0, Ordering::Relaxed);
-    }
-}
-
-fn persist_history_sample(sample: &RuntimeSample) {
-    if !collection_enabled() {
-        return;
-    }
-
-    let now_uptime_s = (embassy_time::Instant::now().as_ticks() / embassy_time::TICK_HZ) as u32;
-    let last = HISTORY_LAST_PERSIST_UPTIME_S.load(Ordering::Relaxed);
-    if last != 0 && now_uptime_s.saturating_sub(last) < HISTORY_SAMPLE_INTERVAL_SECS {
-        return;
-    }
-
-    let capacity = HISTORY_CAPACITY.load(Ordering::Relaxed);
-    if capacity == 0 {
-        return;
-    }
-
-    HISTORY_LAST_PERSIST_UPTIME_S.store(now_uptime_s, Ordering::Relaxed);
-
-    let target_centi = TARGET_TEMP_CENTI.load(Ordering::Relaxed) as i16;
-    let temp_centi = (sample.temp_c * 100.0) as i16;
-    let output_deci = (sample.pid_output * 10.0) as u16;
-
-    critical_section::with(|cs| {
-        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
-        let Some(storage) = guard.as_mut() else {
-            return;
-        };
-
-        let write_index = HISTORY_WRITE_INDEX.load(Ordering::Relaxed);
-        let mut count = HISTORY_COUNT.load(Ordering::Relaxed);
-        let offset = history_record_offset(write_index);
-        let records_per_sector = HISTORY_SECTOR_SIZE / HISTORY_RECORD_SIZE;
-
-        if offset % HISTORY_SECTOR_SIZE == 0 {
-            if storage.erase(offset, offset + HISTORY_SECTOR_SIZE).is_err() {
-                return;
-            }
-            let removed = core::cmp::min(count, records_per_sector);
-            count = count.saturating_sub(removed);
-        }
-
-        let seq = HISTORY_NEXT_SEQ.load(Ordering::Relaxed);
-        let mut raw = [0xFFu8; HISTORY_RECORD_SIZE as usize];
-        raw[0..4].copy_from_slice(&seq.to_le_bytes());
-        raw[4..6].copy_from_slice(&temp_centi.to_le_bytes());
-        raw[6..8].copy_from_slice(&target_centi.to_le_bytes());
-        raw[8..10].copy_from_slice(&output_deci.to_le_bytes());
-        raw[10] = sample.pid_window_step;
-        raw[11] = sample.pid_on_steps;
-        raw[12] = if sample.heating_on { 1 } else { 0 };
-        raw[13] = 0;
-        raw[14] = 0;
-        raw[15] = 0;
-
-        if Storage::write(storage, offset, &raw).is_err() {
-            return;
-        }
-
-        HISTORY_WRITE_INDEX.store((write_index + 1) % capacity, Ordering::Relaxed);
-        HISTORY_NEXT_SEQ.store(seq.wrapping_add(1), Ordering::Relaxed);
-        HISTORY_COUNT.store(
-            core::cmp::min(count.saturating_add(1), capacity),
-            Ordering::Relaxed,
-        );
-    });
-}
-
-pub fn clear_history_persistent() -> Result<(), PersistError> {
-    let capacity = HISTORY_CAPACITY.load(Ordering::Relaxed);
-    if capacity == 0 {
-        return Err(PersistError::MissingPartition);
-    }
-    let start = HISTORY_BASE_OFFSET.load(Ordering::Relaxed);
-    let end = start + capacity.saturating_mul(HISTORY_RECORD_SIZE);
-
-    critical_section::with(|cs| {
-        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
-        let Some(storage) = guard.as_mut() else {
-            return Err(PersistError::NotInitialized);
-        };
-
-        let mut sector = start;
-        while sector < end {
-            storage.erase(sector, sector + HISTORY_SECTOR_SIZE)?;
-            sector += HISTORY_SECTOR_SIZE;
-        }
-        Ok(())
-    })?;
-
-    HISTORY_WRITE_INDEX.store(0, Ordering::Relaxed);
-    HISTORY_NEXT_SEQ.store(0, Ordering::Relaxed);
-    HISTORY_COUNT.store(0, Ordering::Relaxed);
-    HISTORY_LAST_PERSIST_UPTIME_S.store(0, Ordering::Relaxed);
-    Ok(())
-}
-
-pub fn history_sample_interval_secs() -> u32 {
-    HISTORY_SAMPLE_INTERVAL_SECS
-}
-
-pub fn history_total_samples() -> u32 {
-    HISTORY_COUNT.load(Ordering::Relaxed)
-}
-
-pub fn history_snapshot(max_points: usize) -> Vec<HistorySample> {
-    let capacity = HISTORY_CAPACITY.load(Ordering::Relaxed);
-    if capacity == 0 || max_points == 0 {
-        return Vec::new();
-    }
-
-    let start_index = HISTORY_WRITE_INDEX.load(Ordering::Relaxed);
-
-    critical_section::with(|cs| {
-        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
-        let Some(storage) = guard.as_mut() else {
-            return Vec::new();
-        };
-
-        let mut raw = [0u8; HISTORY_RECORD_SIZE as usize];
-        let mut valid_count = 0usize;
-        for step in 0..capacity {
-            let index = (start_index + step) % capacity;
-            if storage
-                .read(history_record_offset(index), &mut raw)
-                .is_err()
-            {
-                continue;
-            }
-            if history_record_valid(&raw) {
-                valid_count += 1;
-            }
-        }
-
-        if valid_count == 0 {
-            return Vec::new();
-        }
-
-        let keep = core::cmp::min(max_points, valid_count);
-        let skip = valid_count.saturating_sub(keep);
-        let mut out = Vec::with_capacity(keep);
-        let mut seen = 0usize;
-
-        for step in 0..capacity {
-            let index = (start_index + step) % capacity;
-            if storage
-                .read(history_record_offset(index), &mut raw)
-                .is_err()
-            {
-                continue;
-            }
-            if !history_record_valid(&raw) {
-                continue;
-            }
-
-            if seen >= skip {
-                let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-                let temp_centi = i16::from_le_bytes([raw[4], raw[5]]);
-                let target_centi = i16::from_le_bytes([raw[6], raw[7]]);
-                let output_deci = u16::from_le_bytes([raw[8], raw[9]]);
-                out.push(HistorySample {
-                    seq,
-                    temp_c: temp_centi as f32 / 100.0,
-                    target_c: target_centi as f32 / 100.0,
-                    output_percent: output_deci as f32 / 10.0,
-                    window_step: raw[10],
-                    on_steps: raw[11],
-                    relay_on: raw[12] != 0,
-                });
-            }
-            seen += 1;
-        }
-
-        out
-    })
-}
-
-#[allow(
-    clippy::large_stack_frames,
-    reason = "partition table parsing requires a fixed-size temporary buffer"
-)]
-pub fn init_persistent_target(flash: FLASH<'static>) -> Option<f32> {
-    let mut storage = FlashStorage::new(flash);
-    let mut loaded = None;
-    let partition_table_buf = PARTITION_TABLE_BUFFER.take();
-
-    if let Ok(partition_table) = read_partition_table(&mut storage, partition_table_buf) {
-        for entry in partition_table.iter() {
-            if entry.label_as_str() == TARGET_PARTITION_LABEL {
-                TARGET_STORE_OFFSET.store(entry.offset(), Ordering::Relaxed);
-                TARGET_STORE_PARTITION_LEN.store(entry.len(), Ordering::Relaxed);
-                break;
-            }
-        }
-    }
-
-    let store_offset = TARGET_STORE_OFFSET.load(Ordering::Relaxed);
-    let store_len = TARGET_STORE_PARTITION_LEN.load(Ordering::Relaxed);
-
-    if store_len >= TARGET_STORE_SIZE as u32 {
-        let mut raw = [0u8; TARGET_STORE_SIZE];
-        if storage.read(store_offset, &mut raw).is_ok()
-            && raw[0..4] == TARGET_STORE_MAGIC
-            && raw[4] == TARGET_STORE_VERSION
-        {
-            let target_centi = i32::from_le_bytes([raw[5], raw[6], raw[7], raw[8]]);
-            if valid_target_centi(target_centi) {
-                TARGET_TEMP_CENTI.store(target_centi, Ordering::Relaxed);
-                loaded = Some(target_centi as f32 / 100.0);
-            }
-        }
-    }
-
-    history_init(&mut storage, store_offset, store_len);
-
-    critical_section::with(|cs| {
-        FLASH_STORAGE.borrow_ref_mut(cs).replace(storage);
-    });
-
-    loaded
-}
-
-pub fn get_target_temp_c() -> f32 {
-    TARGET_TEMP_CENTI.load(Ordering::Relaxed) as f32 / 100.0
-}
 
 pub fn collection_enabled() -> bool {
     COLLECTION_ENABLED.load(Ordering::Relaxed)
@@ -447,59 +174,6 @@ pub fn collection_enabled() -> bool {
 
 pub fn set_collection_enabled(enabled: bool) {
     COLLECTION_ENABLED.store(enabled, Ordering::Relaxed);
-}
-
-pub fn set_target_temp_c_persistent(target_c: f32) -> Result<(), PersistError> {
-    let scaled = target_c * 100.0;
-    let target_centi = if scaled >= 0.0 {
-        (scaled + 0.5) as i32
-    } else {
-        (scaled - 0.5) as i32
-    };
-    if !valid_target_centi(target_centi) {
-        return Err(PersistError::OutOfRange);
-    }
-
-    TARGET_TEMP_CENTI.store(target_centi, Ordering::Relaxed);
-    persist_target_temp_c(target_centi)
-}
-
-fn persist_target_temp_c(target_centi: i32) -> Result<(), PersistError> {
-    let store_offset = TARGET_STORE_OFFSET.load(Ordering::Relaxed);
-    let store_len = TARGET_STORE_PARTITION_LEN.load(Ordering::Relaxed);
-
-    if store_len == 0 {
-        return Err(PersistError::MissingPartition);
-    }
-    if store_len < TARGET_STORE_SIZE as u32 {
-        return Err(PersistError::PartitionTooSmall);
-    }
-
-    critical_section::with(|cs| {
-        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
-        let Some(storage) = guard.as_mut() else {
-            return Err(PersistError::NotInitialized);
-        };
-
-        let mut raw = [0u8; TARGET_STORE_SIZE];
-        raw[0..4].copy_from_slice(&TARGET_STORE_MAGIC);
-        raw[4] = TARGET_STORE_VERSION;
-        raw[5..9].copy_from_slice(&target_centi.to_le_bytes());
-
-        Storage::write(storage, store_offset, &raw)?;
-        Ok(())
-    })
-}
-
-pub struct RuntimeSample {
-    pub temp_c: f32,
-    pub pid_output: f32,
-    pub heating_on: bool,
-    pub led_red: u8,
-    pub led_green: u8,
-    pub led_blue: u8,
-    pub pid_window_step: u8,
-    pub pid_on_steps: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -597,53 +271,6 @@ pub struct PrometheusSnapshot {
     pub probe_name: heapless::String<TEMP_PROBE_NAME_MAX_LEN>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum ProbeNameError {
-    Empty,
-    TooLong,
-    InvalidChar,
-}
-
-fn is_valid_probe_name_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.')
-}
-
-pub fn set_temp_probe_name(name: &str) -> Result<(), ProbeNameError> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err(ProbeNameError::Empty);
-    }
-    if trimmed.len() > TEMP_PROBE_NAME_MAX_LEN {
-        return Err(ProbeNameError::TooLong);
-    }
-    if !trimmed.chars().all(is_valid_probe_name_char) {
-        return Err(ProbeNameError::InvalidChar);
-    }
-
-    let mut normalized = heapless::String::<TEMP_PROBE_NAME_MAX_LEN>::new();
-    normalized
-        .push_str(trimmed)
-        .map_err(|_| ProbeNameError::TooLong)?;
-
-    critical_section::with(|cs| {
-        *TEMP_PROBE_NAME.borrow_ref_mut(cs) = normalized;
-    });
-    Ok(())
-}
-
-pub fn temp_probe_name() -> heapless::String<TEMP_PROBE_NAME_MAX_LEN> {
-    critical_section::with(|cs| {
-        let current = TEMP_PROBE_NAME.borrow_ref(cs);
-        if current.is_empty() {
-            let mut fallback = heapless::String::new();
-            let _ = fallback.push_str("probe-1");
-            fallback
-        } else {
-            current.clone()
-        }
-    })
-}
-
 fn clear_ntp_peers_by_source(source: shared::NtpSource) {
     critical_section::with(|cs| {
         let mut peers = NTP_PEERS.borrow_ref_mut(cs);
@@ -716,18 +343,18 @@ pub fn ntp_peers_snapshot() -> heapless::Vec<NtpPeerSnapshot, { shared::NTP_MAX_
 
 /// Snapshot all metric state needed for JSON and text formatting.
 pub fn metrics_snapshot() -> MetricsSnapshot {
-    let temp_centi = LAST_TEMP_CENTI.load(Ordering::Relaxed);
+    let temp_centi = primary_temp_centi();
     let pid_deci = LAST_PID_OUTPUT_DECI_PERCENT.load(Ordering::Relaxed);
     let relay_on = LAST_RELAY_ON.load(Ordering::Relaxed);
     let collection_enabled = COLLECTION_ENABLED.load(Ordering::Relaxed);
-    let sensor_status_code = LAST_SENSOR_STATUS.load(Ordering::Relaxed);
+    let sensor_status_code = primary_sensor_status();
     let led_red = LAST_LED_RED.load(Ordering::Relaxed);
     let led_green = LAST_LED_GREEN.load(Ordering::Relaxed);
     let led_blue = LAST_LED_BLUE.load(Ordering::Relaxed);
     let pid_window_step = LAST_PID_WINDOW_STEP.load(Ordering::Relaxed);
     let pid_on_steps = LAST_PID_ON_STEPS.load(Ordering::Relaxed);
 
-    let target_c = TARGET_TEMP_CENTI.load(Ordering::Relaxed) as f32 / 100.0;
+    let target_c = super::storage::get_target_temp_c();
     let target_f = target_c * 9.0 / 5.0 + 32.0;
     let ip_valid = LAST_IP_VALID.load(Ordering::Relaxed);
     let net_state_code = LAST_NET_STATE.load(Ordering::Relaxed);
@@ -771,13 +398,13 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
 
 /// Snapshot all metric state needed for Prometheus formatting.
 pub fn prometheus_snapshot() -> PrometheusSnapshot {
-    let temp_centi = LAST_TEMP_CENTI.load(Ordering::Relaxed);
+    let temp_centi = primary_temp_centi();
     let pid_deci = LAST_PID_OUTPUT_DECI_PERCENT.load(Ordering::Relaxed);
     let pid_window_step = LAST_PID_WINDOW_STEP.load(Ordering::Relaxed);
     let pid_on_steps = LAST_PID_ON_STEPS.load(Ordering::Relaxed);
     let relay_on = LAST_RELAY_ON.load(Ordering::Relaxed);
 
-    let target_c = TARGET_TEMP_CENTI.load(Ordering::Relaxed) as f32 / 100.0;
+    let target_c = super::storage::get_target_temp_c();
     let target_f = target_c * 9.0 / 5.0 + 32.0;
     let ntp_synced = NTP_SYNCED.load(Ordering::Relaxed);
     let ntp_sync_count = NTP_SYNC_COUNT.load(Ordering::Relaxed);
@@ -816,28 +443,64 @@ fn mark_ip_invalid(state: NetState) {
 }
 
 pub fn update_success(sample: RuntimeSample) {
-    LAST_TEMP_CENTI.store((sample.temp_c * 100.0) as i32, Ordering::Relaxed);
+    // Update primary sensor (index 0) with current reading
+    LAST_TEMP_CENTI[0].store((sample.temp_c * 100.0) as i32, Ordering::Relaxed);
     LAST_PID_OUTPUT_DECI_PERCENT.store((sample.pid_output * 10.0) as u16, Ordering::Relaxed);
     LAST_RELAY_ON.store(sample.heating_on, Ordering::Relaxed);
-    LAST_SENSOR_STATUS.store(SensorStatus::None as u8, Ordering::Relaxed);
+    LAST_SENSOR_STATUS[0].store(SensorStatus::None as u8, Ordering::Relaxed);
     LAST_LED_RED.store(sample.led_red, Ordering::Relaxed);
     LAST_LED_GREEN.store(sample.led_green, Ordering::Relaxed);
     LAST_LED_BLUE.store(sample.led_blue, Ordering::Relaxed);
     LAST_PID_WINDOW_STEP.store(sample.pid_window_step, Ordering::Relaxed);
     LAST_PID_ON_STEPS.store(sample.pid_on_steps, Ordering::Relaxed);
-    persist_history_sample(&sample);
+    if collection_enabled() {
+        // Map UNKNOWN_TEMPERATURE_CENTI (i32::MIN) to i32::MAX so that missing
+        // sensor readings are stored as the NaN sentinel rather than as
+        // an invalid −327.68 °C temperature.
+        let map = |v: i32| {
+            if v == UNKNOWN_TEMPERATURE_CENTI {
+                i32::MAX
+            } else {
+                v
+            }
+        };
+        let extra_temps_centi = [
+            map(sensor_temp_centi(1)),
+            map(sensor_temp_centi(2)),
+            map(sensor_temp_centi(3)),
+        ];
+        super::storage::persist_history_sample(&sample, &extra_temps_centi);
+    }
 }
 
 pub fn update_error(error: SensorError, led_red: u8, led_green: u8, led_blue: u8) {
-    LAST_TEMP_CENTI.store(UNKNOWN_TEMPERATURE_CENTI, Ordering::Relaxed);
+    LAST_TEMP_CENTI[0].store(UNKNOWN_TEMPERATURE_CENTI, Ordering::Relaxed);
     LAST_PID_OUTPUT_DECI_PERCENT.store(0, Ordering::Relaxed);
     LAST_RELAY_ON.store(false, Ordering::Relaxed);
-    LAST_SENSOR_STATUS.store(SensorStatus::from(error) as u8, Ordering::Relaxed);
+    LAST_SENSOR_STATUS[0].store(SensorStatus::from(error) as u8, Ordering::Relaxed);
     LAST_LED_RED.store(led_red, Ordering::Relaxed);
     LAST_LED_GREEN.store(led_green, Ordering::Relaxed);
     LAST_LED_BLUE.store(led_blue, Ordering::Relaxed);
     LAST_PID_WINDOW_STEP.store(0, Ordering::Relaxed);
     LAST_PID_ON_STEPS.store(0, Ordering::Relaxed);
+}
+
+/// Update a specific sensor's reading (for auxiliary sensors)
+#[allow(dead_code)]
+pub fn update_sensor(sensor_index: usize, temp_c: f32) {
+    if sensor_index < MAX_SENSORS {
+        LAST_TEMP_CENTI[sensor_index].store((temp_c * 100.0) as i32, Ordering::Relaxed);
+        LAST_SENSOR_STATUS[sensor_index].store(SensorStatus::None as u8, Ordering::Relaxed);
+    }
+}
+
+/// Report an error for a specific sensor
+#[allow(dead_code)]
+pub fn update_sensor_error(sensor_index: usize, error: SensorError) {
+    if sensor_index < MAX_SENSORS {
+        LAST_TEMP_CENTI[sensor_index].store(UNKNOWN_TEMPERATURE_CENTI, Ordering::Relaxed);
+        LAST_SENSOR_STATUS[sensor_index].store(SensorStatus::from(error) as u8, Ordering::Relaxed);
+    }
 }
 
 pub fn update_led(led_red: u8, led_green: u8, led_blue: u8) {

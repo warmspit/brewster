@@ -1,27 +1,28 @@
-const TREND_SAMPLE_INTERVAL_SECONDS = 2;
-const HISTORY_FETCH_POINTS = 400;
-let lastHistorySeq = -1;
-let collecting = false;
-let syncCollectingUi = null;
-let collectionToggleInFlight = false;
-let pollRequestInFlight = false;
-let zoomStart = 0;
-let zoomEnd = 1;
-let loadedHistoryBaseSeconds = 0;
-const NO_DATA_FONT = "700 20px 'Avenir Next', 'Trebuchet MS', sans-serif";
-
+// --- ui.js ---
 const delayMs = (ms) => new Promise((resolve) => {
   window.setTimeout(resolve, ms);
 });
 
-const drawNoData = (ctx, width, height) => {
-  ctx.save();
-  ctx.font = NO_DATA_FONT;
-  ctx.fillStyle = "rgba(230, 241, 255, 0.72)";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("No Data", Math.round(width / 2), Math.round(height / 2));
-  ctx.restore();
+const byId = (id) => {
+  const el = document.getElementById(id);
+  if (!el) {
+    throw new Error(`Missing element: ${id}`);
+  }
+  return el;
+};
+
+const setText = (id, text) => {
+  byId(id).textContent = text;
+};
+
+const formatTemp = (value, unit) => {
+  if (value === null || Number.isNaN(value)) return `--.- ${unit}`;
+  return `${value.toFixed(1)} ${unit}`;
+};
+
+const formatNumber = (value, suffix = "") => {
+  if (value === null || Number.isNaN(value)) return "--";
+  return `${value.toFixed(2)}${suffix}`;
 };
 
 const formatElapsed = (totalSeconds) => {
@@ -37,92 +38,243 @@ const formatElapsed = (totalSeconds) => {
   return `${s}s`;
 };
 
+const formatUptime = (uptimeSec) => {
+  const h = Math.floor(uptimeSec / 3600);
+  const m = Math.floor((uptimeSec % 3600) / 60);
+  const s = uptimeSec % 60;
+  return `${h}h ${m}m ${s}s`;
+};
+
+const setTargetFeedback = (text, tone = "normal") => {
+  const feedback = byId("target-feedback");
+  feedback.textContent = text;
+  if (tone === "ok") {
+    feedback.style.color = "#40d990";
+  } else if (tone === "error") {
+    feedback.style.color = "#ff6e6e";
+  } else {
+    feedback.style.color = "";
+  }
+};
+
+const updateNtpPill = (synced) => {
+  const pill = byId("ntp-pill");
+  if (synced) {
+    pill.className = "status-pill status-ok";
+    pill.textContent = "NTP synced";
+  } else {
+    pill.className = "status-pill status-warn";
+    pill.textContent = "NTP pending";
+  }
+};
+
+// --- api.js ---
+const HISTORY_FETCH_POINTS = 400;
+
+const submitTargetTemperature = async (tempC) => {
+  const response = await fetch("/temperature", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ temperature_c: tempC }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+};
+
+const clearHistoryOnDevice = async () => {
+  const response = await fetch("/history/clear", { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+};
+
+const setCollectionOnDevice = async (enabled, getPollInFlight) => {
+  const path = enabled ? "/collection/start" : "/collection/stop";
+  // Avoid colliding control requests with in-flight polling on the single-connection HTTP task.
+  for (let i = 0; i < 6 && getPollInFlight(); i += 1) {
+    await new Promise((resolve) => { window.setTimeout(resolve, 80); });
+  }
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(path, { method: "POST", cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) {
+        await new Promise((resolve) => { window.setTimeout(resolve, 120 * attempt); });
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+};
+
+// --- charts.js ---
+const TREND_SAMPLE_INTERVAL_SECONDS = 2;
+const CHART_CANVAS_WIDTH = 1120;
+const CHART_CANVAS_HEIGHT = 220;
+const NO_DATA_FONT = "700 20px 'Avenir Next', 'Trebuchet MS', sans-serif";
+
+const CHART_LAYOUT = {
+  axisPadLeft: 46,
+  plotPadTop: 8,
+  plotPadBottom: 8,
+  sparklinePadRight: 6,
+  pidPadRight: 24,
+};
+
+// Zoom window state: owned here so chart drawNow() can read without coupling to app module.
+let zoomStart = 0;
+let zoomEnd = 1;
+
+const setZoomWindow = (start, end) => {
+  zoomStart = start;
+  zoomEnd = end;
+};
+
+const drawNoData = (ctx, width, height) => {
+  const { axisPadLeft, plotPadTop, plotPadBottom } = CHART_LAYOUT;
+  const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
+  const axisColor = "rgba(159, 180, 203, 0.35)";
+
+  ctx.strokeStyle = axisColor;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(axisPadLeft, plotPadTop);
+  ctx.lineTo(axisPadLeft, height - plotPadBottom);
+  ctx.stroke();
+
+  ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+  ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
+  ctx.textAlign = "right";
+
+  const tickValues = [100, 50, 0];
+  tickValues.forEach((tickValue) => {
+    const norm = tickValue / 100;
+    const y = height - plotPadBottom - norm * plotHeight;
+    ctx.strokeStyle = axisColor;
+    ctx.beginPath();
+    ctx.moveTo(axisPadLeft, y);
+    ctx.lineTo(width - 4, y);
+    ctx.stroke();
+    ctx.fillText(`${tickValue.toFixed(0)}°C`, axisPadLeft - 4, y + 4);
+  });
+
+  ctx.strokeStyle = axisColor;
+  ctx.beginPath();
+  ctx.moveTo(axisPadLeft, height - plotPadBottom);
+  ctx.lineTo(width - 4, height - plotPadBottom);
+  ctx.stroke();
+
+  ctx.save();
+  ctx.font = NO_DATA_FONT;
+  ctx.fillStyle = "rgba(230, 241, 255, 0.72)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("No Data", Math.round(width / 2), Math.round(height / 2));
+  ctx.restore();
+};
+
 class Sparkline {
   constructor(canvas) {
     this.canvas = canvas;
-    this.values = [];
-    this.hoverX = null;
-    this.elapsedSeconds = null;
+    this._values = [];
+    this._hoverX = null;
+    this._elapsedSeconds = null;
+    this._rafId = null;
     this.canvas.addEventListener("mousemove", (event) => {
-      this.updateHover(event.clientX);
+      this._updateHover(event.clientX);
     });
     this.canvas.addEventListener("mouseleave", () => {
-      this.hoverX = null;
-      this.draw();
+      this._hoverX = null;
+      this._draw();
     });
   }
 
   setValues(values) {
-    this.values.length = 0;
-    this.values.push(...values);
-    this.draw();
+    this._values.splice(0, this._values.length, ...values);
+    this._draw();
   }
 
   setElapsedSeconds(seconds) {
-    this.elapsedSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : null;
-    this.draw();
+    this._elapsedSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : null;
+    this._draw();
   }
 
   setHoverRatio(ratio) {
     if (ratio === null) {
-      if (this.hoverX !== null) {
-        this.hoverX = null;
-        this.draw();
+      if (this._hoverX !== null) {
+        this._hoverX = null;
+        this._draw();
       }
       return;
     }
-
-    const axisPadLeft = 46;
-    const plotWidth = Math.max(1, this.canvas.width - axisPadLeft - 6);
+    const { axisPadLeft, sparklinePadRight } = CHART_LAYOUT;
+    const plotWidth = Math.max(1, this.canvas.width - axisPadLeft - sparklinePadRight);
     const clampedRatio = Math.max(0, Math.min(1, ratio));
     const x = axisPadLeft + clampedRatio * plotWidth;
-    if (this.hoverX !== x) {
-      this.hoverX = x;
-      this.draw();
+    if (this._hoverX !== x) {
+      this._hoverX = x;
+      this._draw();
     }
   }
 
-  updateHover(clientX) {
+  _updateHover(clientX) {
     const rect = this.canvas.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * this.canvas.width;
-    if (this.hoverX !== x) {
-      this.hoverX = x;
-      this.draw();
+    if (this._hoverX !== x) {
+      this._hoverX = x;
+      this._draw();
     }
   }
 
   push(value) {
-    this.values.push(value);
-    this.draw();
+    this._values.push(value);
+    this._draw();
   }
 
   clear() {
-    this.values.length = 0;
-    this.draw();
+    this._values.length = 0;
+    this._draw();
   }
 
   redraw() {
-    this.draw();
+    this._draw();
   }
 
-  draw() {
+  _draw() {
+    if (this._rafId !== null) {
+      return;
+    }
+    this._rafId = window.requestAnimationFrame(() => {
+      this._rafId = null;
+      this._drawNow();
+    });
+  }
+
+  _drawNow() {
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;
 
     const { width, height } = this.canvas;
     ctx.clearRect(0, 0, width, height);
 
-    if (this.values.length < 2) {
+    if (this._values.length < 2) {
       drawNoData(ctx, width, height);
       return;
     }
 
-    const axisPadLeft = 46;
-    const plotPadTop = 8;
-    const plotPadBottom = 8;
-    const plotWidth = Math.max(1, width - axisPadLeft - 6);
+    const { axisPadLeft, plotPadTop, plotPadBottom, sparklinePadRight } = CHART_LAYOUT;
+    const plotWidth = Math.max(1, width - axisPadLeft - sparklinePadRight);
     const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
-    const n = this.values.length;
+    const n = this._values.length;
     const visStart = zoomStart * (n - 1);
     const visEnd = zoomEnd * (n - 1);
     const iFirst = Math.max(0, Math.floor(visStart));
@@ -131,7 +283,7 @@ class Sparkline {
     let min = Number.POSITIVE_INFINITY;
     let max = Number.NEGATIVE_INFINITY;
     for (let i = iFirst; i <= iLast; i++) {
-      const v = this.values[i];
+      const v = this._values[i];
       if (v < min) min = v;
       if (v > max) max = v;
     }
@@ -170,7 +322,7 @@ class Sparkline {
     ctx.moveTo(axisPadLeft, height - plotPadBottom);
     ctx.lineTo(width - 4, height - plotPadBottom);
     ctx.stroke();
-    const elapsedSeconds = this.elapsedSeconds ?? ((this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS);
+    const elapsedSeconds = this._elapsedSeconds ?? ((this._values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS);
     ctx.save();
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
@@ -195,7 +347,7 @@ class Sparkline {
     ctx.beginPath();
     for (let i = iFirst; i <= iLast; i++) {
       const x = xForIdx(i);
-      const y = yFor(this.values[i]);
+      const y = yFor(this._values[i]);
       if (i === iFirst) {
         ctx.moveTo(x, y);
       } else {
@@ -205,11 +357,11 @@ class Sparkline {
     ctx.stroke();
     ctx.restore();
 
-    if (this.hoverX !== null && this.values.length > 0) {
-      const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this.hoverX));
+    if (this._hoverX !== null && this._values.length > 0) {
+      const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this._hoverX));
       const ratio = (clampedX - axisPadLeft) / plotWidth;
       const index = Math.max(0, Math.min(n - 1, Math.round(visStart + ratio * (visEnd - visStart))));
-      const value = this.values[index];
+      const value = this._values[index];
       const x = clampedX;
       const y = yFor(value);
       const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
@@ -258,100 +410,106 @@ class Sparkline {
 }
 
 class PidChart {
-  constructor(canvas) {
-    this.canvas = canvas;
-    this.values = [];
-    this.hoverX = null;
-    this.elapsedSeconds = null;
-    this.canvas.addEventListener("mousemove", (event) => {
-      this.updateHover(event.clientX);
-    });
-    this.canvas.addEventListener("mouseleave", () => {
-      this.hoverX = null;
-      this.draw();
-    });
-  }
-
-  static signedOutput(sample) {
+  static _signedOutput(sample) {
     if (sample.output_percent <= 0) {
       return 0;
     }
     return -Math.max(0, Math.min(1, sample.output_percent / 100));
   }
 
-  static signedRelay(sample) {
+  static _signedRelay(sample) {
     return sample.relay_on ? -1 : 0;
   }
 
+  constructor(canvas) {
+    this.canvas = canvas;
+    this._values = [];
+    this._hoverX = null;
+    this._elapsedSeconds = null;
+    this._rafId = null;
+    this.canvas.addEventListener("mousemove", (event) => {
+      this._updateHover(event.clientX);
+    });
+    this.canvas.addEventListener("mouseleave", () => {
+      this._hoverX = null;
+      this._draw();
+    });
+  }
+
   setValues(values) {
-    this.values.length = 0;
-    this.values.push(...values);
-    this.draw();
+    this._values.splice(0, this._values.length, ...values);
+    this._draw();
   }
 
   setElapsedSeconds(seconds) {
-    this.elapsedSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : null;
-    this.draw();
+    this._elapsedSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : null;
+    this._draw();
   }
 
   setHoverRatio(ratio) {
     if (ratio === null) {
-      if (this.hoverX !== null) {
-        this.hoverX = null;
-        this.draw();
+      if (this._hoverX !== null) {
+        this._hoverX = null;
+        this._draw();
       }
       return;
     }
-
-    const axisPadLeft = 46;
-    const plotWidth = Math.max(1, this.canvas.width - axisPadLeft - 6);
+    const { axisPadLeft, pidPadRight } = CHART_LAYOUT;
+    const plotWidth = Math.max(1, this.canvas.width - axisPadLeft - pidPadRight);
     const clampedRatio = Math.max(0, Math.min(1, ratio));
     const x = axisPadLeft + clampedRatio * plotWidth;
-    if (this.hoverX !== x) {
-      this.hoverX = x;
-      this.draw();
+    if (this._hoverX !== x) {
+      this._hoverX = x;
+      this._draw();
     }
   }
 
-  updateHover(clientX) {
+  _updateHover(clientX) {
     const rect = this.canvas.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * this.canvas.width;
-    if (this.hoverX !== x) {
-      this.hoverX = x;
-      this.draw();
+    if (this._hoverX !== x) {
+      this._hoverX = x;
+      this._draw();
     }
   }
 
   push(sample) {
-    this.values.push(sample);
-    this.draw();
+    this._values.push(sample);
+    this._draw();
   }
 
   clear() {
-    this.values.length = 0;
-    this.draw();
+    this._values.length = 0;
+    this._draw();
   }
 
   redraw() {
-    this.draw();
+    this._draw();
   }
 
-  draw() {
+  _draw() {
+    if (this._rafId !== null) {
+      return;
+    }
+    this._rafId = window.requestAnimationFrame(() => {
+      this._rafId = null;
+      this._drawNow();
+    });
+  }
+
+  _drawNow() {
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;
 
     const { width, height } = this.canvas;
     ctx.clearRect(0, 0, width, height);
 
-    if (this.values.length < 2) {
+    if (this._values.length < 2) {
       drawNoData(ctx, width, height);
       return;
     }
 
-    const axisPadLeft = 46;
-    const axisPadRight = 24;
-    const plotPadTop = 8;
-    const plotPadBottom = 8;
+    const { axisPadLeft, plotPadTop, plotPadBottom, pidPadRight: axisPadRight } = CHART_LAYOUT;
     const plotWidth = Math.max(1, width - axisPadLeft - axisPadRight);
     const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
 
@@ -364,11 +522,11 @@ class PidChart {
       { color: "#ffb3d1", value: (p) => p.on_steps },
     ];
     const rightSeries = [
-      { color: "#ff8d6e", value: (p) => PidChart.signedOutput(p) },
-      { color: "#ffffff", value: (p) => PidChart.signedRelay(p) },
+      { color: "#ff8d6e", value: (p) => PidChart._signedOutput(p) },
+      { color: "#ffffff", value: (p) => PidChart._signedRelay(p) },
     ];
 
-    const n = this.values.length;
+    const n = this._values.length;
     const visStart = zoomStart * (n - 1);
     const visEnd = zoomEnd * (n - 1);
     const iFirst = Math.max(0, Math.floor(visStart));
@@ -377,7 +535,7 @@ class PidChart {
     let leftMin = Number.POSITIVE_INFINITY;
     let leftMax = Number.NEGATIVE_INFINITY;
     for (let i = iFirst; i <= iLast; i++) {
-      const point = this.values[i];
+      const point = this._values[i];
       leftSeries.forEach((entry) => {
         const v = entry.value(point);
         if (v < leftMin) leftMin = v;
@@ -443,7 +601,7 @@ class PidChart {
     ctx.moveTo(axisPadLeft, height - plotPadBottom);
     ctx.lineTo(width - axisPadRight, height - plotPadBottom);
     ctx.stroke();
-    const elapsedSeconds = this.elapsedSeconds ?? ((this.values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS);
+    const elapsedSeconds = this._elapsedSeconds ?? ((this._values.length - 1) * TREND_SAMPLE_INTERVAL_SECONDS);
     ctx.save();
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
@@ -465,7 +623,7 @@ class PidChart {
       ctx.strokeStyle = entry.color;
       for (let i = iFirst; i <= iLast; i++) {
         const x = xForIdx(i);
-        const y = yForLeft(entry.value(this.values[i]));
+        const y = yForLeft(entry.value(this._values[i]));
         if (i === iFirst) {
           ctx.moveTo(x, y);
         } else {
@@ -480,12 +638,12 @@ class PidChart {
       ctx.strokeStyle = entry.color;
       for (let i = iFirst; i <= iLast; i++) {
         const x = xForIdx(i);
-        const y = yForRight(entry.value(this.values[i]));
+        const y = yForRight(entry.value(this._values[i]));
         if (i === iFirst) {
           ctx.moveTo(x, y);
         } else {
           if (idx === rightSeries.length - 1) {
-            ctx.lineTo(x, yForRight(entry.value(this.values[i - 1])));
+            ctx.lineTo(x, yForRight(entry.value(this._values[i - 1])));
             ctx.lineTo(x, y);
           } else {
             ctx.lineTo(x, y);
@@ -496,14 +654,14 @@ class PidChart {
     });
     ctx.restore();
 
-    if (this.hoverX !== null && this.values.length > 0) {
-      const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this.hoverX));
+    if (this._hoverX !== null && this._values.length > 0) {
+      const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this._hoverX));
       const ratio = (clampedX - axisPadLeft) / plotWidth;
       const i = Math.max(0, Math.min(n - 1, Math.round(visStart + ratio * (visEnd - visStart))));
-      const sample = this.values[i];
+      const sample = this._values[i];
       const x = clampedX;
       const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
-      const signedOutput = PidChart.signedOutput(sample);
+      const signedOutput = PidChart._signedOutput(sample);
       const relayMode = sample.relay_on ? "cool" : "off";
       const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
       const tip2 = `t:${sample.target_c.toFixed(1)} kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
@@ -549,103 +707,26 @@ class PidChart {
   }
 }
 
-const byId = (id) => {
-  const el = document.getElementById(id);
-  if (!el) {
-    throw new Error(`Missing element: ${id}`);
-  }
-  return el;
-};
-
-const setText = (id, text) => {
-  byId(id).textContent = text;
-};
-
-const formatTemp = (value, unit) => {
-  if (value === null || Number.isNaN(value)) return `--.- ${unit}`;
-  return `${value.toFixed(1)} ${unit}`;
-};
-
-const formatNumber = (value, suffix = "") => {
-  if (value === null || Number.isNaN(value)) return "--";
-  return `${value.toFixed(2)}${suffix}`;
-};
-
-const formatUptime = (uptimeSec) => {
-  const h = Math.floor(uptimeSec / 3600);
-  const m = Math.floor((uptimeSec % 3600) / 60);
-  const s = uptimeSec % 60;
-  return `${h}h ${m}m ${s}s`;
-};
-
+// --- dashboard ---
+let lastHistorySeq = -1;
+let collecting = false;
+let syncCollectingUi = null;
+let collectionToggleInFlight = false;
+let pollRequestInFlight = false;
+let loadedHistoryBaseSeconds = 0;
 let lastUptimeSeconds = null;
 
-const setTargetFeedback = (text, tone = "normal") => {
-  const feedback = byId("target-feedback");
-  feedback.textContent = text;
-  if (tone === "ok") {
-    feedback.style.color = "#40d990";
-  } else if (tone === "error") {
-    feedback.style.color = "#ff6e6e";
-  } else {
-    feedback.style.color = "";
-  }
-};
-
-const submitTargetTemperature = async (tempC) => {
-  const response = await fetch("/temperature", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ temperature_c: tempC }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-};
-
-const clearHistoryOnDevice = async () => {
-  const response = await fetch("/history/clear", { method: "POST" });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-};
-
-const setCollectionOnDevice = async (enabled) => {
-  const path = enabled ? "/collection/start" : "/collection/stop";
-  // Avoid colliding control requests with in-flight polling on the single-connection HTTP task.
-  for (let i = 0; i < 6 && pollRequestInFlight; i += 1) {
-    await delayMs(80);
-  }
-  let lastError = null;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      const response = await fetch(path, { method: "POST", cache: "no-store" });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      return;
-    } catch (error) {
-      lastError = error;
-      if (attempt < 3) {
-        await delayMs(120 * attempt);
-      }
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-};
-
-const loadHistoryFromDevice = async (sparkline, pidChart) => {
+const loadHistoryFromDevice = async (sparklines, pidChart) => {
   const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
-  const payload = await response.json();
+  const payload = (await response.json());
   const points = Array.isArray(payload.points) ? payload.points : [];
   const tempValues = [];
   const pidValues = [];
+  // Keyed by sensor index (1-based); extra sensor temps from history columns 7+
+  const extraTempValues = new Map();
 
   points.forEach((point) => {
     if (!Array.isArray(point) || point.length < 7) {
@@ -662,6 +743,13 @@ const loadHistoryFromDevice = async (sparkline, pidChart) => {
       on_steps: Number(point[5]),
       relay_on: Number(point[6]),
     });
+    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2, etc.
+    for (let col = 7; col < point.length; col++) {
+      const sensorIdx = col - 6;
+      if (!extraTempValues.has(sensorIdx)) extraTempValues.set(sensorIdx, []);
+      const raw = point[col];
+      extraTempValues.get(sensorIdx).push(raw != null ? Number(raw) : NaN);
+    }
     lastHistorySeq = Number(point[0]);
   });
 
@@ -671,19 +759,31 @@ const loadHistoryFromDevice = async (sparkline, pidChart) => {
       : TREND_SAMPLE_INTERVAL_SECONDS;
   loadedHistoryBaseSeconds = Math.max(0, tempValues.length - 1) * sampleIntervalS;
 
-  sparkline.setValues(tempValues);
+  const primarySparkline = sparklines.get(0);
+  if (primarySparkline) {
+    primarySparkline.setValues(tempValues);
+    primarySparkline.setElapsedSeconds(loadedHistoryBaseSeconds);
+  }
+  for (const [sensorIdx, values] of extraTempValues) {
+    const sl = sparklines.get(sensorIdx);
+    if (sl) {
+      sl.setValues(values);
+      sl.setElapsedSeconds(loadedHistoryBaseSeconds);
+    }
+  }
   pidChart.setValues(pidValues);
-  sparkline.setElapsedSeconds(loadedHistoryBaseSeconds);
   pidChart.setElapsedSeconds(loadedHistoryBaseSeconds);
 };
 
-const mergeHistoryFromDevice = async (sparkline, pidChart) => {
+const mergeHistoryFromDevice = async (sparklines, pidChart) => {
   const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
-  const payload = await response.json();
+  const payload = (await response.json());
   const points = Array.isArray(payload.points) ? payload.points : [];
+  const primarySparkline = sparklines.get(0);
+  if (!primarySparkline) return;
 
   points.forEach((point) => {
     if (!Array.isArray(point) || point.length < 7) {
@@ -694,7 +794,16 @@ const mergeHistoryFromDevice = async (sparkline, pidChart) => {
       return;
     }
     lastHistorySeq = seq;
-    sparkline.push(Number(point[1]));
+    primarySparkline.push(Number(point[1]));
+    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2, etc.
+    for (let col = 7; col < point.length; col++) {
+      const sensorIdx = col - 6;
+      const sl = sparklines.get(sensorIdx);
+      if (sl) {
+        const raw = point[col];
+        sl.push(raw != null ? Number(raw) : NaN);
+      }
+    }
     pidChart.push({
       target_c: Number(point[2]),
       kp: 14.0,
@@ -708,18 +817,17 @@ const mergeHistoryFromDevice = async (sparkline, pidChart) => {
   });
 };
 
-const updateNtpPill = (synced) => {
-  const pill = byId("ntp-pill");
-  if (synced) {
-    pill.className = "status-pill status-ok";
-    pill.textContent = "NTP synced";
-  } else {
-    pill.className = "status-pill status-warn";
-    pill.textContent = "NTP pending";
-  }
-};
+const updateFromStatus = (
+  data,
+  sparklines,
+  pidCharts,
+  setControlProbeIndex,
+  setTempProbeLabel,
+  setPidProbeLabel,
+  ensureTemperatureCharts,
+) => {
+  setControlProbeIndex(data.control_probe_index);
 
-const updateFromStatus = (data, sparkline, pidChart) => {
   if (typeof data.system.collecting === "boolean") {
     if (syncCollectingUi) {
       syncCollectingUi(data.system.collecting);
@@ -731,22 +839,39 @@ const updateFromStatus = (data, sparkline, pidChart) => {
   lastUptimeSeconds = data.system.uptime_s;
   if (collecting) {
     const totalElapsed = loadedHistoryBaseSeconds + data.system.uptime_s;
-    sparkline.setElapsedSeconds(totalElapsed);
-    pidChart.setElapsedSeconds(totalElapsed);
+    sparklines.forEach((sparkline) => {
+      sparkline.setElapsedSeconds(totalElapsed);
+    });
+    pidCharts.forEach((pidChart) => {
+      pidChart.setElapsedSeconds(totalElapsed);
+    });
   }
 
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
   setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
+  if (data.system && data.system.uptime_s !== null) {
+    setText("uptime", `Uptime: ${formatUptime(data.system.uptime_s)}`);
+  }
+  ensureTemperatureCharts(data.sensors || []);
 
-  setText("temp", formatTemp(data.sensor.ds18b20.temperature_c, "C"));
-  setText("temp-secondary", formatTemp(data.sensor.ds18b20.temperature_f, "F"));
+  const primarySensor = data.sensors && data.sensors.length > 0 ? data.sensors[0] : null;
+  if (primarySensor) {
+    setText("temp", formatTemp(primarySensor.temperature_c, "C"));
+    setText("temp-secondary", formatTemp(primarySensor.temperature_f, "F"));
+  }
 
-  const probeName = data.sensor.ds18b20.name || "";
-  setText("temp-chart-probe", probeName || "--");
-  setText("pid-chart-probe", probeName || "--");
+  if (Array.isArray(data.sensors)) {
+    data.sensors.forEach((sensor) => {
+      setTempProbeLabel(sensor.index, sensor.name);
+      setPidProbeLabel(sensor.index, sensor.name);
 
-  if (collecting && data.sensor.ds18b20.temperature_c !== null) {
-    sparkline.push(data.sensor.ds18b20.temperature_c);
+      if (collecting && sensor.temperature_c !== null) {
+        const sensorChart = sparklines.get(sensor.index);
+        if (sensorChart) {
+          sensorChart.push(sensor.temperature_c);
+        }
+      }
+    });
   }
 
   setText("target", `${data.pid.target_c.toFixed(1)} C`);
@@ -760,25 +885,36 @@ const updateFromStatus = (data, sparkline, pidChart) => {
   const relayState = !collecting ? "Deactivated" : (data.pid.relay_on ? "On" : "Off");
   setText("relay", relayState);
   byId("relay").style.color = relayState === "Deactivated" ? "#ff6e6e" : "";
+
   if (collecting) {
-    pidChart.push({
-    target_c: data.pid.target_c,
-    kp: data.pid.kp,
-    ki: data.pid.ki,
-    kd: data.pid.kd,
-    output_percent: data.pid.output_percent,
-    window_step: data.pid.window_step,
-    on_steps: data.pid.on_steps,
-    relay_on: data.pid.relay_on ? 1 : 0,
+    const sample = {
+      target_c: data.pid.target_c,
+      kp: data.pid.kp,
+      ki: data.pid.ki,
+      kd: data.pid.kd,
+      output_percent: data.pid.output_percent,
+      window_step: data.pid.window_step,
+      on_steps: data.pid.on_steps,
+      relay_on: data.pid.relay_on ? 1 : 0,
+    };
+    pidCharts.forEach((pidChart) => {
+      pidChart.push(sample);
     });
   }
 
   setText("ip", data.system.ip || "--");
   updateNtpPill(data.system.ntp.synced);
-
 };
 
-const loop = async (sparkline, pidChart) => {
+const loop = async (
+  sparklines,
+  pidCharts,
+  primaryPidChart,
+  setControlProbeIndex,
+  setTempProbeLabel,
+  setPidProbeLabel,
+  ensureTemperatureCharts,
+) => {
   if (collectionToggleInFlight || pollRequestInFlight) {
     return;
   }
@@ -789,13 +925,22 @@ const loop = async (sparkline, pidChart) => {
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    const payload = await response.json();
-    updateFromStatus(payload, sparkline, pidChart);
+    const payload = (await response.json());
+    updateFromStatus(
+      payload,
+      sparklines,
+      pidCharts,
+      setControlProbeIndex,
+      setTempProbeLabel,
+      setPidProbeLabel,
+      ensureTemperatureCharts,
+    );
     if (collecting) {
-      await mergeHistoryFromDevice(sparkline, pidChart);
+      await mergeHistoryFromDevice(sparklines, primaryPidChart);
     }
   } catch (error) {
-    setText("updated", `Update failed: ${String(error)}`);
+    const msg = error instanceof TypeError ? "No link \u2014 retrying\u2026" : `Update failed: ${String(error)}`;
+    setText("updated", msg);
     const pill = byId("ntp-pill");
     pill.className = "status-pill status-danger";
     pill.textContent = "Link error";
@@ -805,49 +950,145 @@ const loop = async (sparkline, pidChart) => {
 };
 
 const start = () => {
-  const chart = byId("temp-chart");
-  const pidCanvas = byId("pid-chart");
-  const sparkline = new Sparkline(chart);
-  const pidChart = new PidChart(pidCanvas);
+  const sparklines = new Map();
+  const pidCharts = new Map();
+  const tempLabelEls = new Map();
+  const pidLabelEls = new Map();
+  let controlProbeIndex = 0;
+
+  const primaryCanvas = document.getElementById("temp-chart-0");
+  const primaryCard = primaryCanvas?.closest("article");
+
+  const pidCanvas = document.getElementById("pid-chart-0");
+  const pidCard = pidCanvas?.closest("article");
+  const section = document.querySelector("section");
+
+  if (!pidCanvas || !primaryCanvas || !primaryCard || !pidCard || !section) {
+    setText("updated", "Error: Dashboard layout mismatch");
+    return;
+  }
+
+  primaryCard.dataset.sensorIndex = "0";
+  primaryCard.dataset.cardType = "temp";
+  pidCard.dataset.sensorIndex = "0";
+  pidCard.dataset.cardType = "pid";
+
+  sparklines.set(0, new Sparkline(primaryCanvas));
+  pidCharts.set(0, new PidChart(pidCanvas));
+
+  const primaryChart = sparklines.get(0);
+  const primaryPidChart = pidCharts.get(0);
+  const primaryTempLabel = document.getElementById("temp-chart-probe-0");
+  const primaryPidLabel = document.getElementById("pid-chart-probe-0");
+  if (primaryTempLabel) {
+    tempLabelEls.set(0, primaryTempLabel);
+  }
+  if (primaryPidLabel) {
+    pidLabelEls.set(0, primaryPidLabel);
+  }
+
+  const setControlProbeIndex = (nextIndex) => {
+    if (!Number.isFinite(nextIndex)) {
+      return;
+    }
+    const normalized = Math.max(0, Math.floor(nextIndex));
+    if (normalized === controlProbeIndex) {
+      return;
+    }
+
+    const primaryPid = pidCharts.get(controlProbeIndex);
+    if (primaryPid) {
+      pidCharts.delete(controlProbeIndex);
+      pidCharts.set(normalized, primaryPid);
+    }
+
+    const label = pidLabelEls.get(controlProbeIndex);
+    if (label) {
+      pidLabelEls.delete(controlProbeIndex);
+      pidLabelEls.set(normalized, label);
+    }
+
+    pidCard.dataset.sensorIndex = String(normalized);
+    controlProbeIndex = normalized;
+  };
+
+  const setLabelIfChanged = (el, next) => {
+    if (!el) {
+      return;
+    }
+    if (el.textContent !== next) {
+      el.textContent = next;
+    }
+  };
+
+  const setTempProbeLabel = (index, label) => {
+    const next = label || "--";
+    const cached = tempLabelEls.get(index);
+    if (cached) {
+      setLabelIfChanged(cached, next);
+      return;
+    }
+    const found = document.getElementById(`temp-chart-probe-${index}`);
+    if (found) {
+      tempLabelEls.set(index, found);
+      setLabelIfChanged(found, next);
+    }
+  };
+
+  const setPidProbeLabel = (index, label) => {
+    const next = label || "--";
+    const cached = pidLabelEls.get(index);
+    if (cached) {
+      setLabelIfChanged(cached, next);
+      return;
+    }
+    const found = document.getElementById(`pid-chart-probe-${index}`);
+    if (found) {
+      pidLabelEls.set(index, found);
+      setLabelIfChanged(found, next);
+    }
+  };
+
   const hoverRatioForClientX = (canvas, clientX) => {
     const rect = canvas.getBoundingClientRect();
     const canvasX = ((clientX - rect.left) / rect.width) * canvas.width;
-    const axisPadLeft = 46;
-    const plotWidth = Math.max(1, canvas.width - axisPadLeft - 6);
+    const { axisPadLeft, sparklinePadRight } = CHART_LAYOUT;
+    const plotWidth = Math.max(1, canvas.width - axisPadLeft - sparklinePadRight);
     return Math.max(0, Math.min(1, (canvasX - axisPadLeft) / plotWidth));
   };
 
-  chart.addEventListener("mousemove", (event) => {
-    pidChart.setHoverRatio(hoverRatioForClientX(chart, event.clientX));
+  // Set up hover synchronization between primary temperature chart and PID chart
+  primaryChart.canvas.addEventListener("mousemove", (event) => {
+    primaryPidChart.setHoverRatio(hoverRatioForClientX(primaryChart.canvas, event.clientX));
   });
-  chart.addEventListener("mouseleave", () => {
-    pidChart.setHoverRatio(null);
+  primaryChart.canvas.addEventListener("mouseleave", () => {
+    primaryPidChart.setHoverRatio(null);
   });
   pidCanvas.addEventListener("mousemove", (event) => {
-    sparkline.setHoverRatio(hoverRatioForClientX(pidCanvas, event.clientX));
+    primaryChart.setHoverRatio(hoverRatioForClientX(pidCanvas, event.clientX));
   });
   pidCanvas.addEventListener("mouseleave", () => {
-    sparkline.setHoverRatio(null);
+    primaryChart.setHoverRatio(null);
   });
 
   const applyZoom = (pivotRatio, factor) => {
     const span = zoomEnd - zoomStart;
     const newSpan = Math.max(0.02, Math.min(1, span * factor));
     const center = zoomStart + pivotRatio * span;
-    zoomStart = Math.max(0, center - pivotRatio * newSpan);
-    zoomEnd = zoomStart + newSpan;
-    if (zoomEnd > 1) { zoomEnd = 1; zoomStart = Math.max(0, 1 - newSpan); }
-    sparkline.redraw();
-    pidChart.redraw();
+    let newStart = Math.max(0, center - pivotRatio * newSpan);
+    let newEnd = newStart + newSpan;
+    if (newEnd > 1) { newEnd = 1; newStart = Math.max(0, 1 - newSpan); }
+    setZoomWindow(newStart, newEnd);
+    sparklines.forEach((sparkline) => sparkline.redraw());
+    pidCharts.forEach((chart) => chart.redraw());
   };
 
   const applyPan = (delta) => {
     const span = zoomEnd - zoomStart;
     const newStart = Math.max(0, Math.min(1 - span, zoomStart + delta * span));
-    zoomStart = newStart;
-    zoomEnd = newStart + span;
-    sparkline.redraw();
-    pidChart.redraw();
+    setZoomWindow(newStart, newStart + span);
+    sparklines.forEach((sparkline) => sparkline.redraw());
+    pidCharts.forEach((chart) => chart.redraw());
   };
 
   const onWheelZoom = (canvas, e) => {
@@ -861,16 +1102,139 @@ const start = () => {
   };
 
   const resetZoom = () => {
-    zoomStart = 0;
-    zoomEnd = 1;
-    sparkline.redraw();
-    pidChart.redraw();
+    setZoomWindow(0, 1);
+    sparklines.forEach((sparkline) => sparkline.redraw());
+    pidCharts.forEach((chart) => chart.redraw());
   };
 
-  chart.addEventListener("wheel", (e) => onWheelZoom(chart, e), { passive: false });
-  pidCanvas.addEventListener("wheel", (e) => onWheelZoom(pidCanvas, e), { passive: false });
-  chart.addEventListener("dblclick", resetZoom);
-  pidCanvas.addEventListener("dblclick", resetZoom);
+  section.addEventListener("wheel", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const canvas = target.closest("canvas.chart");
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      return;
+    }
+    onWheelZoom(canvas, event);
+  }, { passive: false });
+
+  section.addEventListener("dblclick", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const canvas = target.closest("canvas.chart");
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      return;
+    }
+    resetZoom();
+  });
+
+  const createTempCard = (index, name) => {
+    const newTempCard = primaryCard.cloneNode(true);
+    newTempCard.dataset.sensorIndex = String(index);
+    newTempCard.dataset.cardType = "temp";
+
+    const tempNameEl = newTempCard.querySelector(".chart-title-left");
+    if (tempNameEl) {
+      tempNameEl.id = `temp-chart-probe-${index}`;
+      tempLabelEls.set(index, tempNameEl);
+      setLabelIfChanged(tempNameEl, name || `probe-${index + 1}`);
+    }
+
+    const tempCanvas = newTempCard.querySelector("canvas.chart");
+    if (!tempCanvas) {
+      return false;
+    }
+    tempCanvas.id = `temp-chart-${index}`;
+    tempCanvas.width = CHART_CANVAS_WIDTH;
+    tempCanvas.height = CHART_CANVAS_HEIGHT;
+
+    const sparkline = new Sparkline(tempCanvas);
+    sparklines.set(index, sparkline);
+    sparkline.setElapsedSeconds(loadedHistoryBaseSeconds);
+
+    section.appendChild(newTempCard);
+    return true;
+  };
+
+  const createPidCard = (index, name) => {
+    const newPidCard = pidCard.cloneNode(true);
+    newPidCard.dataset.sensorIndex = String(index);
+    newPidCard.dataset.cardType = "pid";
+
+    const pidNameEl = newPidCard.querySelector(".chart-title-left");
+    if (pidNameEl) {
+      pidNameEl.id = `pid-chart-probe-${index}`;
+      pidLabelEls.set(index, pidNameEl);
+      setLabelIfChanged(pidNameEl, name || `probe-${index + 1}`);
+    }
+
+    const newPidCanvas = newPidCard.querySelector("canvas.chart");
+    if (!newPidCanvas) {
+      return false;
+    }
+    newPidCanvas.id = `pid-chart-${index}`;
+    newPidCanvas.width = CHART_CANVAS_WIDTH;
+    newPidCanvas.height = CHART_CANVAS_HEIGHT;
+
+    const chart = new PidChart(newPidCanvas);
+    chart.setElapsedSeconds(loadedHistoryBaseSeconds);
+    pidCharts.set(index, chart);
+
+    section.appendChild(newPidCard);
+    return true;
+  };
+
+  const ensureTemperatureCharts = (sensors) => {
+    if (!Array.isArray(sensors)) {
+      return;
+    }
+
+    const sortedSensors = [...sensors]
+      .map((sensor) => ({ ...sensor, index: Number(sensor.index) }))
+      .filter((sensor) => Number.isFinite(sensor.index) && sensor.index >= 0)
+      .sort((a, b) => a.index - b.index);
+
+    let cardsChanged = false;
+
+    sortedSensors.forEach((sensor) => {
+      const index = sensor.index;
+      if (index === 0) {
+        return;
+      }
+
+      if (!sparklines.has(index)) {
+        cardsChanged = createTempCard(index, sensor.name) || cardsChanged;
+      }
+
+      // Only create PID card if this is the control probe
+      if (index === controlProbeIndex && !pidCharts.has(index)) {
+        cardsChanged = createPidCard(index, sensor.name) || cardsChanged;
+      }
+    });
+
+    if (!cardsChanged) {
+      return;
+    }
+
+    const tempCards = [];
+    section.querySelectorAll("article[data-card-type]").forEach((el) => {
+      const article = el;
+      if (article.dataset.cardType === "temp") tempCards.push(article);
+    });
+
+    tempCards.forEach((el) => {
+      const idx = Number(el.dataset.sensorIndex);
+      const pidCardEl = section.querySelector(
+        `article[data-card-type='pid'][data-sensor-index='${idx}']`,
+      );
+      if (pidCardEl) {
+        section.insertBefore(el, pidCardEl);
+      }
+    });
+  };
 
   const targetInput = byId("target-input");
   const targetSubmit = byId("target-submit");
@@ -891,7 +1255,15 @@ const start = () => {
     try {
       await submitTargetTemperature(parsed);
       setTargetFeedback(`Applied ${parsed.toFixed(1)} C`, "ok");
-      await loop(sparkline, pidChart);
+      await loop(
+        sparklines,
+        pidCharts,
+        primaryPidChart,
+        setControlProbeIndex,
+        setTempProbeLabel,
+        setPidProbeLabel,
+        ensureTemperatureCharts,
+      );
     } catch (error) {
       setTargetFeedback(`Apply failed: ${String(error)}`, "error");
     } finally {
@@ -909,16 +1281,33 @@ const start = () => {
     }
   });
 
-  loadHistoryFromDevice(sparkline, pidChart)
+  loadHistoryFromDevice(sparklines, primaryPidChart)
     .catch((error) => {
-      setText("updated", `History load failed: ${String(error)}`);
+      const msg = error instanceof TypeError ? "No link \u2014 retrying\u2026" : `History load failed: ${String(error)}`;
+      setText("updated", msg);
     })
     .finally(() => {
-      void loop(sparkline, pidChart);
+      void loop(
+        sparklines,
+        pidCharts,
+        primaryPidChart,
+        setControlProbeIndex,
+        setTempProbeLabel,
+        setPidProbeLabel,
+        ensureTemperatureCharts,
+      );
     });
   window.setInterval(() => {
-    void loop(sparkline, pidChart);
-  }, 2000);
+    void loop(
+      sparklines,
+      pidCharts,
+      primaryPidChart,
+      setControlProbeIndex,
+      setTempProbeLabel,
+      setPidProbeLabel,
+      ensureTemperatureCharts,
+    );
+  }, 5000);
 
   const menuBtn = byId("menu-btn");
   const menuDropdown = byId("menu-dropdown");
@@ -943,7 +1332,7 @@ const start = () => {
     collectionToggleInFlight = true;
     startDataBtn.disabled = true;
     stopDataBtn.disabled = true;
-    void setCollectionOnDevice(true)
+    void setCollectionOnDevice(true, () => pollRequestInFlight)
       .then(() => {
         setCollecting(true);
       })
@@ -963,7 +1352,7 @@ const start = () => {
     collectionToggleInFlight = true;
     startDataBtn.disabled = true;
     stopDataBtn.disabled = true;
-    void setCollectionOnDevice(false)
+    void setCollectionOnDevice(false, () => pollRequestInFlight)
       .then(() => {
         setCollecting(false);
       })
@@ -994,9 +1383,10 @@ const start = () => {
   clearDataBtn.addEventListener("click", () => {
     clearHistoryOnDevice()
       .then(() => {
-        sparkline.clear();
-        pidChart.clear();
+        sparklines.forEach((sparkline) => sparkline.clear());
+        pidCharts.forEach((chart) => chart.clear());
         lastUptimeSeconds = null;
+        loadedHistoryBaseSeconds = 0;
       })
       .catch((error) => {
         setText("updated", `Clear failed: ${String(error)}`);

@@ -1,6 +1,6 @@
 # Brewster – local build-time configuration
 #
-# Copy this file to .cargo/config.local.toml and edit to suit your setup.
+# Copy this content into config.local.toml at the repository root and edit to suit your setup.
 # build.rs reads key = "value" pairs from that file and injects them as
 # compile-time environment variables via cargo:rustc-env.
 #

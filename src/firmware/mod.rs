@@ -9,3 +9,4 @@ pub mod network;
 pub mod sensor;
 pub mod shared;
 pub mod status;
+pub mod storage;
