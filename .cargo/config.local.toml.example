@@ -30,36 +30,3 @@ PASSWORD    = "hunter2"
 
 # Wi-Fi: perform a full scan every N reconnect attempts (default: 6)
 # WIFI_SCAN_EVERY_ATTEMPTS = "6"
-
-# Brewster – local build-time configuration
-#
-# Copy this file to .cargo/config.local.toml and edit to suit your setup.
-# build.rs reads key = "value" pairs from that file and injects them as
-# compile-time environment variables via cargo:rustc-env.
-#
-# All keys are optional. Defaults are shown in comments.
-
-# ── Wi-Fi ────────────────────────────────────────────────────────────
-SSID        = "MyNetwork"
-PASSWORD    = "hunter2"
-
-# ── Device identity ──────────────────────────────────────────────────
-# mDNS hostname (default: "brewster")
-# DEVICE_HOSTNAME = "brewster"
-
-# Default temperature probe name (default: "probe-1")
-# TEMP_PROBE_NAME = "probe-1"
-
-# ── NTP ──────────────────────────────────────────────────────────────
-# Comma-separated list of NTP server IPs (IPv4)
-# NTP_SERVERS = "192.168.1.1,216.239.35.0"
-
-# Single NTP server IP (used if NTP_SERVERS is not set)
-# NTP_SERVER = "192.168.1.1"
-
-# ── Tuning ───────────────────────────────────────────────────────────
-# How often to print status to serial (seconds, default: 5)
-# STATUS_PRINT_EVERY_SECONDS = "5"
-
-# Wi-Fi: perform a full scan every N reconnect attempts (default: 6)
-# WIFI_SCAN_EVERY_ATTEMPTS = "6"
