@@ -181,9 +181,18 @@ pub fn json() -> String {
         let sensor_temp_centi = status::sensor_temp_centi(sensor_idx);
         let sensor_status_code = status::sensor_status(sensor_idx);
         let sensor_name = match sensor_idx {
-            0 => super::config::SENSORS.first().map(|s| s.name).unwrap_or("probe-1"),
-            1 => super::config::SENSORS.get(1).map(|s| s.name).unwrap_or("probe-2"),
-            2 => super::config::SENSORS.get(2).map(|s| s.name).unwrap_or("probe-3"),
+            0 => super::config::SENSORS
+                .first()
+                .map(|s| s.name)
+                .unwrap_or("probe-1"),
+            1 => super::config::SENSORS
+                .get(1)
+                .map(|s| s.name)
+                .unwrap_or("probe-2"),
+            2 => super::config::SENSORS
+                .get(2)
+                .map(|s| s.name)
+                .unwrap_or("probe-3"),
             _ => "unknown",
         };
 

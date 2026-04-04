@@ -22,7 +22,9 @@ fn generate_sensor_config() {
     }
 
     if sensors.len() > MAX_SENSORS {
-        println!("cargo:warning=Only the first 3 sensors are supported; truncating config.local.toml [[sensors]] list");
+        println!(
+            "cargo:warning=Only the first 3 sensors are supported; truncating config.local.toml [[sensors]] list"
+        );
         sensors.truncate(MAX_SENSORS);
     }
 
@@ -43,7 +45,7 @@ fn generate_sensor_config() {
         generated.push_str(" },\n");
     }
     generated.push_str("];\n");
-    
+
     // Add control probe index (default to 0 if not specified)
     generated.push_str("\n#[allow(dead_code)]\npub const CONTROL_PROBE_INDEX: usize = ");
     generated.push_str(&control_index.to_string());
@@ -62,7 +64,12 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
     let mut in_sensor_block = false;
     let mut sensor_count = 0;
 
-    let mut finalize_current = |pin: &mut Option<u8>, name: &mut Option<String>, is_control: &mut bool, index: &mut usize, control_index: &mut usize, control_found: &mut bool| {
+    let mut finalize_current = |pin: &mut Option<u8>,
+                                name: &mut Option<String>,
+                                is_control: &mut bool,
+                                index: &mut usize,
+                                control_index: &mut usize,
+                                control_found: &mut bool| {
         if let (Some(p), Some(n)) = (pin.take(), name.take()) {
             sensors.push((p, n));
             if *is_control && !*control_found {
@@ -83,7 +90,14 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
 
         if trimmed == "[[sensors]]" {
             if in_sensor_block {
-                finalize_current(&mut current_pin, &mut current_name, &mut current_control, &mut sensor_count, &mut control_index, &mut control_found);
+                finalize_current(
+                    &mut current_pin,
+                    &mut current_name,
+                    &mut current_control,
+                    &mut sensor_count,
+                    &mut control_index,
+                    &mut control_found,
+                );
             }
             in_sensor_block = true;
             current_pin = None;
@@ -94,7 +108,14 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
 
         if trimmed.starts_with('[') {
             if in_sensor_block {
-                finalize_current(&mut current_pin, &mut current_name, &mut current_control, &mut sensor_count, &mut control_index, &mut control_found);
+                finalize_current(
+                    &mut current_pin,
+                    &mut current_name,
+                    &mut current_control,
+                    &mut sensor_count,
+                    &mut control_index,
+                    &mut control_found,
+                );
                 in_sensor_block = false;
                 current_pin = None;
                 current_name = None;
@@ -133,7 +154,14 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
     }
 
     if in_sensor_block {
-        finalize_current(&mut current_pin, &mut current_name, &mut current_control, &mut sensor_count, &mut control_index, &mut control_found);
+        finalize_current(
+            &mut current_pin,
+            &mut current_name,
+            &mut current_control,
+            &mut sensor_count,
+            &mut control_index,
+            &mut control_found,
+        );
     }
 
     (sensors, control_index)
