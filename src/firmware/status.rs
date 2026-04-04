@@ -63,11 +63,6 @@ pub fn runtime_error_active() -> bool {
     LAST_SENSOR_STATUS[0].load(Ordering::Relaxed) != SensorStatus::None as u8
 }
 
-/// Get the number of configured sensors
-pub fn sensor_count() -> usize {
-    super::config::SENSORS.len()
-}
-
 /// Get the primary (first) sensor temperature in centidegrees
 pub fn primary_temp_centi() -> i32 {
     LAST_TEMP_CENTI[0].load(Ordering::Relaxed)
@@ -119,14 +114,9 @@ impl NetState {
 }
 
 const NTP_MAX_TRACKED_PEERS: usize = shared::NTP_MAX_CONFIG_SERVERS + 1;
-pub const MAX_SENSORS: usize = 8;
+pub const MAX_SENSORS: usize = 3;
 
 static LAST_TEMP_CENTI: [AtomicI32; MAX_SENSORS] = [
-    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
-    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
-    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
-    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
-    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
     AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
     AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
     AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
@@ -134,11 +124,6 @@ static LAST_TEMP_CENTI: [AtomicI32; MAX_SENSORS] = [
 static LAST_PID_OUTPUT_DECI_PERCENT: AtomicU16 = AtomicU16::new(0);
 static LAST_RELAY_ON: AtomicBool = AtomicBool::new(false);
 static LAST_SENSOR_STATUS: [AtomicU8; MAX_SENSORS] = [
-    AtomicU8::new(SensorStatus::NoDevice as u8),
-    AtomicU8::new(SensorStatus::NoDevice as u8),
-    AtomicU8::new(SensorStatus::NoDevice as u8),
-    AtomicU8::new(SensorStatus::NoDevice as u8),
-    AtomicU8::new(SensorStatus::NoDevice as u8),
     AtomicU8::new(SensorStatus::NoDevice as u8),
     AtomicU8::new(SensorStatus::NoDevice as u8),
     AtomicU8::new(SensorStatus::NoDevice as u8),

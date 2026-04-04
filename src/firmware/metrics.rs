@@ -172,19 +172,19 @@ pub fn json() -> String {
         device_hostname(),
     );
 
-    // Output all configured sensors (capped at the atomic array size)
-    let sensor_count = status::sensor_count().min(status::MAX_SENSORS);
-    for sensor_idx in 0..sensor_count {
+    // Emit exactly 3 sensors (indices 0, 1, 2) — matching MAX_SENSORS.
+    for sensor_idx in 0..status::MAX_SENSORS {
         if sensor_idx > 0 {
             out.push_str(",\n");
         }
 
         let sensor_temp_centi = status::sensor_temp_centi(sensor_idx);
         let sensor_status_code = status::sensor_status(sensor_idx);
-        let sensor_name = if let Some(cfg) = super::config::SENSORS.get(sensor_idx) {
-            cfg.name
-        } else {
-            "unknown"
+        let sensor_name = match sensor_idx {
+            0 => super::config::SENSORS.first().map(|s| s.name).unwrap_or("probe-1"),
+            1 => super::config::SENSORS.get(1).map(|s| s.name).unwrap_or("probe-2"),
+            2 => super::config::SENSORS.get(2).map(|s| s.name).unwrap_or("probe-3"),
+            _ => "unknown",
         };
 
         let temp_cf = if sensor_temp_centi == status::UNKNOWN_TEMPERATURE_CENTI {

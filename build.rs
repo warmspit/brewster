@@ -11,7 +11,7 @@ fn main() {
 
 fn generate_sensor_config() {
     let local_cfg = "config.local.toml";
-    const MAX_SENSORS: usize = 8;
+    const MAX_SENSORS: usize = 3;
     println!("cargo:rerun-if-changed={local_cfg}");
 
     let contents = std::fs::read_to_string(local_cfg).unwrap_or_default();
@@ -22,7 +22,7 @@ fn generate_sensor_config() {
     }
 
     if sensors.len() > MAX_SENSORS {
-        println!("cargo:warning=Only the first 8 sensors are supported; truncating config.local.toml [[sensors]] list");
+        println!("cargo:warning=Only the first 3 sensors are supported; truncating config.local.toml [[sensors]] list");
         sensors.truncate(MAX_SENSORS);
     }
 
