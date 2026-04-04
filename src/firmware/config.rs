@@ -23,6 +23,18 @@ pub const WS2812_T0L_TICKS: u16 = 9;
 pub const WS2812_T1H_TICKS: u16 = 8;
 pub const WS2812_T1L_TICKS: u16 = 5;
 
+/// Sensor configuration: GPIO pin and human-readable probe name.
+/// Configure these in config.local.toml under [[sensors]].
+/// Currently, the firmware controls the first sensor (index 0).
+/// Additional sensors are read-only on the dashboard.
+pub struct SensorConfig {
+    #[allow(dead_code)]
+    pub pin: u8,
+    pub name: &'static str,
+}
+
+include!(concat!(env!("OUT_DIR"), "/sensors_config.rs"));
+
 pub fn status_print_every_seconds() -> u64 {
     match STATUS_PRINT_EVERY_SECONDS
         .and_then(|v| v.parse::<u64>().ok())

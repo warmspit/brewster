@@ -6,8 +6,8 @@ use esp_hal::delay::Delay;
 use esp_hal::gpio::{Flex, Level, Output};
 use pid::Pid;
 
-use super::{config, sensor, status};
 use super::error::SensorError;
+use super::{config, sensor, status};
 
 #[derive(Clone, Copy)]
 pub struct Rgb8 {
@@ -16,10 +16,10 @@ pub struct Rgb8 {
     pub blue: u8,
 }
 
-fn status_color(temp_c: f32, heating_on: bool) -> Rgb8 {
+fn status_color(temp_c: f32, relay_on: bool) -> Rgb8 {
     let _ = temp_c;
 
-    if heating_on {
+    if relay_on {
         return Rgb8 {
             red: 10,
             green: 4,
@@ -68,17 +68,36 @@ pub async fn control_step(
 
             match sensor::ds18b20_read_temperature_c(one_wire_pin, delay) {
                 Ok(temp_c) => {
-                    pid.setpoint = status::get_target_temp_c();
-                    let pid_output = pid.next_control_output(temp_c).output.clamp(0.0, 100.0);
-                    let on_steps = compute_on_steps(pid_output);
-                    let heating_on = *window_step < on_steps;
+                    if !status::collection_enabled() {
+                        pid.reset_integral_term();
+                        relay.set_low();
+                        *window_step = 0;
+                        let color = status_color(temp_c, false);
+                        status::update_success(status::RuntimeSample {
+                            temp_c,
+                            pid_output: 0.0,
+                            heating_on: false,
+                            led_red: color.red,
+                            led_green: color.green,
+                            led_blue: color.blue,
+                            pid_window_step: 0,
+                            pid_on_steps: 0,
+                        });
+                        return (color, false);
+                    }
 
-                    relay.set_level(if heating_on { Level::High } else { Level::Low });
-                    let color = status_color(temp_c, heating_on);
+                    // Cooling mode: positive control output when temperature is above target.
+                    pid.setpoint = -status::get_target_temp_c();
+                    let pid_output = pid.next_control_output(-temp_c).output.clamp(0.0, 100.0);
+                    let on_steps = compute_on_steps(pid_output);
+                    let cooling_on = *window_step < on_steps;
+
+                    relay.set_level(if cooling_on { Level::High } else { Level::Low });
+                    let color = status_color(temp_c, cooling_on);
                     status::update_success(status::RuntimeSample {
                         temp_c,
                         pid_output,
-                        heating_on,
+                        heating_on: cooling_on,
                         led_red: color.red,
                         led_green: color.green,
                         led_blue: color.blue,
@@ -86,7 +105,7 @@ pub async fn control_step(
                         pid_on_steps: on_steps as u8,
                     });
                     *window_step = (*window_step + 1) % config::SSR_WINDOW_STEPS;
-                    (color, heating_on)
+                    (color, cooling_on)
                 }
                 Err(error) => {
                     pid.reset_integral_term();

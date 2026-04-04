@@ -9,8 +9,10 @@ It reads a DS18B20 temperature sensor, drives a solid-state relay with a PID loo
 - Runs a PID controller once per second.
 - Drives an SSR on GPIO12 using a 10-step time window.
 - Shows basic device state on a WS2812/NeoPixel on GPIO48.
+- Uses LED signaling for boot/HTTP activity and HTTP errors.
 - Connects to Wi-Fi in station mode.
-- Advertises `<hostname>.local` over mDNS.
+- Advertises `<hostname>.local` over mDNS (IPv4 and IPv6 when configured).
+- Advertises an mDNS HTTP service at `_http._tcp.local`.
 - Serves JSON status over HTTP on port 80.
 - Exposes Prometheus metrics over HTTP on `/metrics`.
 - Accepts target temperature updates over HTTP.
@@ -46,15 +48,66 @@ The PID output is converted to a 10-step relay window:
 - `100%` means relay always on
 - intermediate values map to `0..10` relay-on steps per window
 
+LED behavior:
+
+- After boot completes, LED is steady green.
+- During an HTTP exchange, LED switches to blue for the duration of the request/response.
+- If the active HTTP exchange has an error status (non-200) or socket read/write failure, LED is red for the duration of that exchange.
+- Outside HTTP exchanges, any runtime error (for example a failed DS18B20 probe read) makes LED steady red.
+- When no HTTP exchange is active and no runtime error is present, LED is steady green.
+
 ## Network Features
 
 ### mDNS
 
-The device responds to:
+The device responds to and periodically announces:
 
 - `<hostname>.local`
+- `_http._tcp.local` service discovery
+
+Announcement and response details:
+
+- Joins IPv4 mDNS multicast `224.0.0.251:5353`.
+- Joins IPv6 mDNS multicast `ff02::fb:5353`.
+- Publishes `A` records for `<hostname>.local` when IPv4 is configured.
+- Publishes `AAAA` records for `<hostname>.local` when IPv6 is configured.
+- Publishes `PTR`, `SRV`, and `TXT` records for the HTTP service.
+
+Quick checks:
+
+```sh
+dns-sd -G v4v6 brewster.local
+dns-sd -B _http._tcp local
+dns-sd -L brewster _http._tcp local
+```
 
 The hostname comes from configuration and is normalized into a DHCP-safe format.
+
+### Troubleshooting mDNS
+
+If discovery fails from another machine, check these first.
+
+On the Brewster serial console, confirm Wi-Fi and hostname state:
+
+- `wifi: got IPv4 address ...`
+- `wifi: hostname=...`
+
+From another machine on the same LAN:
+
+```sh
+dns-sd -G v4v6 <hostname>.local
+dns-sd -B _http._tcp local
+dns-sd -L <hostname> _http._tcp local
+```
+
+If it still fails, common causes are:
+
+- Device and client are on different VLANs/subnets without an mDNS reflector.
+- AP/router has multicast isolation/filtering enabled.
+- Client resolver cache is stale (flush cache or retry after reconnect).
+- IPv6-only lookup path with no configured IPv6 address on the device.
+
+Host lookup should still work over IPv4 when DHCPv4 is up.
 
 ### HTTP
 
@@ -63,12 +116,31 @@ The HTTP server listens on port `80`.
 Supported routes:
 
 - `GET /`
+- `GET /panel`
+- `GET /dashboard.js`
 - `GET /status`
+- `GET /history?points=<N>`
 - `GET /metrics`
 - `POST /temperature`
 - `POST /probe-name`
+- `POST /collection/start`
+- `POST /collection/stop`
+- `POST /history/clear`
 
-`GET /` and `GET /status` return the same JSON status document.
+`GET /` serves the built-in Grafana-style dashboard UI.
+
+The dashboard polls `GET /status` for live data and visualizes temperature, PID output,
+relay state, system health, and NTP master stats.
+
+Dashboard interactions:
+
+- hover either chart to show synchronized crosshair/tooltip on both charts
+- mouse wheel to zoom time axis in/out around cursor position
+- two-finger horizontal scroll/trackpad pan to move across the zoomed window
+- double-click either chart to reset zoom to full history
+- menu controls to start/stop collection and clear persisted history
+
+`GET /status` returns the raw JSON status document used by the dashboard.
 
 Example:
 
@@ -90,7 +162,21 @@ curl -X POST http://brewster.local/temperature \
   -d '{"temperature_c": 21.5}'
 ```
 
-Accepted temperature range is `0.0..=150.0` degrees C.
+Accepted temperature range is `-20.0..=25.0` degrees C.
+
+To start or stop data collection:
+
+```sh
+curl -X POST http://brewster.local/collection/start
+curl -X POST http://brewster.local/collection/stop
+```
+
+To fetch or clear persisted history:
+
+```sh
+curl 'http://brewster.local/history?points=2000'
+curl -X POST http://brewster.local/history/clear
+```
 
 To set a probe name:
 
@@ -153,10 +239,16 @@ Configured peers are preferred over the DHCP gateway, and the sync task keeps pe
 
 ## Configuration
 
-Build-time configuration is taken from `.cargo/config.local.toml`.
+Build-time configuration is taken from `config.local.toml` at the repository root.
 That file is intentionally ignored by git and is read by `build.rs`, which injects selected values into the firmware via `cargo:rustc-env`.
 
-Create `.cargo/config.local.toml` with values like:
+Start from the tracked example and keep real credentials only in your local file:
+
+```sh
+cp config.local.toml.example config.local.toml
+```
+
+Edit `config.local.toml` with values like:
 
 ```toml
 [env]
@@ -165,10 +257,16 @@ PASSWORD = "your-password"
 DEVICE_HOSTNAME = "brewster"
 WIFI_SCAN_EVERY_ATTEMPTS = "6"
 STATUS_PRINT_EVERY_SECONDS = "5"
-TEMP_PROBE_NAME = "probe-1"
 NTP_SERVERS = "129.6.15.28,194.58.204.20"
 # Optional fallback when NTP_SERVERS is empty or invalid
 NTP_SERVER = "8.8.8.8"
+
+[device]
+hostname = "brewster"
+
+[[sensors]]
+pin = 5
+name = "probe-1"
 ```
 
 Supported keys:
@@ -178,9 +276,24 @@ Supported keys:
 - `DEVICE_HOSTNAME`: advertised hostname and DHCP hostname base
 - `WIFI_SCAN_EVERY_ATTEMPTS`: how often failed connection retries trigger a Wi-Fi scan
 - `STATUS_PRINT_EVERY_SECONDS`: serial console status print interval
-- `TEMP_PROBE_NAME`: default DS18B20 probe name at boot
 - `NTP_SERVERS`: comma-separated IPv4 NTP server list
 - `NTP_SERVER`: single IPv4 fallback NTP server
+
+Probe configuration keys:
+
+- `[device].hostname`: dashboard and network display hostname
+- `[[sensors]].pin`: GPIO pin for a DS18B20 probe
+- `[[sensors]].name`: human-readable probe name shown in status/dashboard
+
+To add another probe, append another `[[sensors]]` block:
+
+```toml
+[[sensors]]
+pin = 6
+name = "probe-2"
+```
+
+Current firmware behavior: PID control uses the first sensor in the list (`[[sensors]]` block #1). Additional sensors are exposed as extra readings.
 
 ## Toolchain And Build Setup
 
@@ -192,6 +305,13 @@ Current project defaults:
 - linker: Xtensa GCC from the local ESP toolchain
 - runner: `espflash flash --monitor --chip esp32s3 --partition-table partitions.csv`
 - build-std: `core`, `alloc`
+
+Network protocol support in this build:
+
+- IPv4: enabled and configured with DHCPv4.
+- IPv6: protocol support enabled in `embassy-net`.
+
+Note: IPv6 mDNS (`AAAA`) is emitted only when the stack has an IPv6 address configured at runtime.
 
 In new terminals, load the ESP environment before running cargo commands:
 
@@ -264,6 +384,8 @@ src/firmware/sensor.rs    DS18B20 one-wire implementation
 src/firmware/network.rs   Wi-Fi, mDNS, HTTP, and NTP tasks
 src/firmware/status.rs    Shared runtime state, JSON/text status, persistence
 src/firmware/shared.rs    Shared utility functions
+web/dashboard.ts          Dashboard source (TypeScript)
+web/dashboard.js          Dashboard runtime script served by firmware (embedded by `include_str!`)
 build.rs                  Build-time env injection and linker diagnostics
 ```
 
@@ -296,7 +418,7 @@ The serial console prints a compact text version of the same operational state a
 
 ## Typical Workflow
 
-1. Create `.cargo/config.local.toml` with Wi-Fi and hostname values.
+1. Create `config.local.toml` with Wi-Fi, hostname, and sensor values.
 2. Load the ESP toolchain environment with `. ~/export-esp.sh`.
 3. Run `cargo check`.
 4. Run `cargo run` to flash and monitor the device.

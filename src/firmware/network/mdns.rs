@@ -6,8 +6,8 @@
     reason = "mDNS task uses fixed packet buffers and macro-generated async wrappers"
 )]
 
-use embassy_net::Stack;
 use embassy_net::udp::UdpSocket;
+use embassy_net::{IpAddress, Stack};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_println::println;
 
@@ -151,13 +151,35 @@ fn question_matches_hostname(query: &[u8], hostname: &[u8]) -> Option<MdnsQuesti
 fn build_mdns_response(
     query: &[u8],
     hostname: &[u8],
-    ip: [u8; 4],
+    ipv4: Option<[u8; 4]>,
+    ipv6: Option<[u8; 16]>,
     out: &mut [u8],
 ) -> Option<(usize, MdnsQuestionMatch)> {
     let question = question_matches_hostname(query, hostname)?;
 
+    let (answer_type, answer_rdlen): (u16, u16) = match question.qtype {
+        1 => {
+            ipv4?;
+            (1, 4)
+        }
+        28 => {
+            ipv6?;
+            (28, 16)
+        }
+        // ANY: prefer IPv4 when available, otherwise advertise IPv6.
+        255 => {
+            if ipv4.is_some() {
+                (1, 4)
+            } else {
+                ipv6?;
+                (28, 16)
+            }
+        }
+        _ => return None,
+    };
+
     let question_len = hostname.len() + 12;
-    let total_len = 12 + question_len + 16;
+    let total_len = 12 + question_len + 12 + answer_rdlen as usize;
     if out.len() < total_len {
         return None;
     }
@@ -194,68 +216,153 @@ fn build_mdns_response(
     let mut i = q;
     out[i] = 0xC0;
     out[i + 1] = 0x0C;
-    out[i + 2] = 0x00;
-    out[i + 3] = 0x01;
+    out[i + 2..i + 4].copy_from_slice(&answer_type.to_be_bytes());
     out[i + 4] = 0x80;
     out[i + 5] = 0x01;
     out[i + 6] = 0x00;
     out[i + 7] = 0x00;
     out[i + 8] = 0x00;
     out[i + 9] = 0x78;
-    out[i + 10] = 0x00;
-    out[i + 11] = 0x04;
-    out[i + 12] = ip[0];
-    out[i + 13] = ip[1];
-    out[i + 14] = ip[2];
-    out[i + 15] = ip[3];
-    i += 16;
+    out[i + 10..i + 12].copy_from_slice(&answer_rdlen.to_be_bytes());
+    let rdata_start = i + 12;
+    let rdata_end = rdata_start + answer_rdlen as usize;
+    if answer_type == 1 {
+        out[rdata_start..rdata_end].copy_from_slice(&ipv4?);
+    } else {
+        out[rdata_start..rdata_end].copy_from_slice(&ipv6?);
+    }
+    i = rdata_end;
 
     Some((i, question))
 }
 
-fn build_mdns_announcement(hostname: &[u8], ip: [u8; 4], out: &mut [u8]) -> Option<usize> {
-    let total_len = 12 + hostname.len() + 18;
-    if out.len() < total_len {
+fn append_bytes(out: &mut [u8], index: &mut usize, bytes: &[u8]) -> Option<()> {
+    if *index + bytes.len() > out.len() {
+        return None;
+    }
+    out[*index..*index + bytes.len()].copy_from_slice(bytes);
+    *index += bytes.len();
+    Some(())
+}
+
+fn append_u16(out: &mut [u8], index: &mut usize, value: u16) -> Option<()> {
+    append_bytes(out, index, &value.to_be_bytes())
+}
+
+fn append_u32(out: &mut [u8], index: &mut usize, value: u32) -> Option<()> {
+    append_bytes(out, index, &value.to_be_bytes())
+}
+
+fn append_dns_name(out: &mut [u8], index: &mut usize, labels: &[&[u8]]) -> Option<()> {
+    for label in labels {
+        if label.len() > 63 {
+            return None;
+        }
+        append_bytes(out, index, &[label.len() as u8])?;
+        append_bytes(out, index, label)?;
+    }
+    append_bytes(out, index, &[0])
+}
+
+fn build_mdns_announcement(
+    hostname: &[u8],
+    ipv4: Option<[u8; 4]>,
+    ipv6: Option<[u8; 16]>,
+    out: &mut [u8],
+) -> Option<usize> {
+    if ipv4.is_none() && ipv6.is_none() {
         return None;
     }
 
-    // Unsolicited mDNS answer packet.
-    out[0] = 0x00;
-    out[1] = 0x00;
-    out[2] = 0x84;
-    out[3] = 0x00;
-    out[4] = 0x00;
-    out[5] = 0x00;
-    out[6] = 0x00;
-    out[7] = 0x01;
-    out[8] = 0x00;
-    out[9] = 0x00;
-    out[10] = 0x00;
-    out[11] = 0x00;
+    let mut answer_count: u16 = 4;
+    if ipv4.is_some() {
+        answer_count += 1;
+    }
+    if ipv6.is_some() {
+        answer_count += 1;
+    }
 
-    let mut i = 12usize;
-    out[i] = hostname.len() as u8;
-    i += 1;
-    out[i..i + hostname.len()].copy_from_slice(hostname);
-    i += hostname.len();
-    out[i] = 5;
-    i += 1;
-    out[i..i + 5].copy_from_slice(b"local");
-    i += 5;
-    out[i] = 0;
-    i += 1;
+    let mut i = 0usize;
 
-    // TYPE=A, CLASS=IN | cache-flush, TTL, RDLENGTH=4, RDATA=IPv4.
-    out[i..i + 2].copy_from_slice(&1u16.to_be_bytes());
-    i += 2;
-    out[i..i + 2].copy_from_slice(&0x8001u16.to_be_bytes());
-    i += 2;
-    out[i..i + 4].copy_from_slice(&MDNS_TTL_SECS.to_be_bytes());
-    i += 4;
-    out[i..i + 2].copy_from_slice(&4u16.to_be_bytes());
-    i += 2;
-    out[i..i + 4].copy_from_slice(&ip);
-    i += 4;
+    // Unsolicited mDNS answer packet with service and host records.
+    append_u16(out, &mut i, 0x0000)?; // transaction id
+    append_u16(out, &mut i, 0x8400)?; // response + authoritative
+    append_u16(out, &mut i, 0x0000)?; // qdcount
+    append_u16(out, &mut i, answer_count)?; // ancount
+    append_u16(out, &mut i, 0x0000)?; // nscount
+    append_u16(out, &mut i, 0x0000)?; // arcount
+
+    let services_labels: [&[u8]; 4] = [b"_services", b"_dns-sd", b"_udp", b"local"];
+    let http_service_labels: [&[u8]; 3] = [b"_http", b"_tcp", b"local"];
+    let http_instance_labels: [&[u8]; 4] = [hostname, b"_http", b"_tcp", b"local"];
+    let host_labels: [&[u8]; 2] = [hostname, b"local"];
+
+    // PTR _services._dns-sd._udp.local -> _http._tcp.local
+    append_dns_name(out, &mut i, &services_labels)?;
+    append_u16(out, &mut i, 12)?; // PTR
+    append_u16(out, &mut i, 0x0001)?; // IN
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    let rdlen_pos = i;
+    append_u16(out, &mut i, 0)?;
+    let rdata_start = i;
+    append_dns_name(out, &mut i, &http_service_labels)?;
+    let rdata_len = (i - rdata_start) as u16;
+    out[rdlen_pos..rdlen_pos + 2].copy_from_slice(&rdata_len.to_be_bytes());
+
+    // PTR _http._tcp.local -> <hostname>._http._tcp.local
+    append_dns_name(out, &mut i, &http_service_labels)?;
+    append_u16(out, &mut i, 12)?; // PTR
+    append_u16(out, &mut i, 0x0001)?; // IN
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    let rdlen_pos = i;
+    append_u16(out, &mut i, 0)?;
+    let rdata_start = i;
+    append_dns_name(out, &mut i, &http_instance_labels)?;
+    let rdata_len = (i - rdata_start) as u16;
+    out[rdlen_pos..rdlen_pos + 2].copy_from_slice(&rdata_len.to_be_bytes());
+
+    // SRV <hostname>._http._tcp.local -> <hostname>.local:80
+    append_dns_name(out, &mut i, &http_instance_labels)?;
+    append_u16(out, &mut i, 33)?; // SRV
+    append_u16(out, &mut i, 0x8001)?; // IN, cache-flush
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    let rdlen_pos = i;
+    append_u16(out, &mut i, 0)?;
+    let rdata_start = i;
+    append_u16(out, &mut i, 0)?; // priority
+    append_u16(out, &mut i, 0)?; // weight
+    append_u16(out, &mut i, super::HTTP_PORT)?; // port
+    append_dns_name(out, &mut i, &host_labels)?; // target host
+    let rdata_len = (i - rdata_start) as u16;
+    out[rdlen_pos..rdlen_pos + 2].copy_from_slice(&rdata_len.to_be_bytes());
+
+    // TXT <hostname>._http._tcp.local (empty TXT payload)
+    append_dns_name(out, &mut i, &http_instance_labels)?;
+    append_u16(out, &mut i, 16)?; // TXT
+    append_u16(out, &mut i, 0x8001)?; // IN, cache-flush
+    append_u32(out, &mut i, MDNS_TTL_SECS)?;
+    append_u16(out, &mut i, 1)?;
+    append_bytes(out, &mut i, &[0x00])?;
+
+    if let Some(ipv4) = ipv4 {
+        // A <hostname>.local -> IPv4
+        append_dns_name(out, &mut i, &host_labels)?;
+        append_u16(out, &mut i, 1)?; // A
+        append_u16(out, &mut i, 0x8001)?; // IN, cache-flush
+        append_u32(out, &mut i, MDNS_TTL_SECS)?;
+        append_u16(out, &mut i, 4)?;
+        append_bytes(out, &mut i, &ipv4)?;
+    }
+
+    if let Some(ipv6) = ipv6 {
+        // AAAA <hostname>.local -> IPv6
+        append_dns_name(out, &mut i, &host_labels)?;
+        append_u16(out, &mut i, 28)?; // AAAA
+        append_u16(out, &mut i, 0x8001)?; // IN, cache-flush
+        append_u32(out, &mut i, MDNS_TTL_SECS)?;
+        append_u16(out, &mut i, 16)?;
+        append_bytes(out, &mut i, &ipv6)?;
+    }
 
     Some(i)
 }
@@ -291,6 +398,12 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
             }
         }
 
+        if !stack.has_multicast_group(super::MDNS_MULTICAST_V6)
+            && let Err(error) = stack.join_multicast_group(super::MDNS_MULTICAST_V6)
+        {
+            println!("mdns: failed to join ipv6 multicast group: {:?}", error);
+        }
+
         let mut socket = UdpSocket::new(stack, rx_meta, rx_buffer, tx_meta, tx_buffer);
         if let Err(error) = socket.bind(super::MDNS_PORT) {
             println!("mdns: bind failed: {:?}", error);
@@ -306,13 +419,21 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
             }
 
             if Instant::now() >= announce_deadline {
-                if let Some(ip) = status::ip_octets()
-                    && let Some(n) = build_mdns_announcement(hostname, ip, send_buf)
+                let ipv4 = status::ip_octets();
+                let ipv6 = current_ipv6_octets(stack);
+                if let Some(n) = build_mdns_announcement(hostname, ipv4, ipv6, send_buf)
                     && let Err(error) = socket
                         .send_to(&send_buf[..n], (super::MDNS_MULTICAST, super::MDNS_PORT))
                         .await
                 {
                     println!("mdns: announce send failed: {:?}", error);
+                }
+                if let Some(n) = build_mdns_announcement(hostname, ipv4, ipv6, send_buf)
+                    && let Err(error) = socket
+                        .send_to(&send_buf[..n], (super::MDNS_MULTICAST_V6, super::MDNS_PORT))
+                        .await
+                {
+                    println!("mdns: ipv6 announce send failed: {:?}", error);
                 }
                 announce_deadline =
                     Instant::now() + Duration::from_secs(MDNS_ANNOUNCE_INTERVAL_SECS);
@@ -325,11 +446,11 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
                     Err(_) => continue,
                 };
 
-            let Some(ip) = status::ip_octets() else {
-                continue;
-            };
+            let ipv4 = status::ip_octets();
+            let ipv6 = current_ipv6_octets(stack);
 
-            let Some((n, question)) = build_mdns_response(packet, hostname, ip, send_buf) else {
+            let Some((n, question)) = build_mdns_response(packet, hostname, ipv4, ipv6, send_buf)
+            else {
                 continue;
             };
 
@@ -340,10 +461,13 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
                     println!("mdns: unicast send failed to {:?}: {:?}", meta, error);
                 }
             } else {
-                if let Err(error) = socket
-                    .send_to(&send_buf[..n], (super::MDNS_MULTICAST, super::MDNS_PORT))
-                    .await
-                {
+                let multicast_destination: (IpAddress, u16) = match meta.endpoint.addr {
+                    IpAddress::Ipv6(_) => {
+                        (IpAddress::Ipv6(super::MDNS_MULTICAST_V6), super::MDNS_PORT)
+                    }
+                    _ => (IpAddress::Ipv4(super::MDNS_MULTICAST), super::MDNS_PORT),
+                };
+                if let Err(error) = socket.send_to(&send_buf[..n], multicast_destination).await {
                     println!("mdns: multicast send failed: {:?}", error);
                 }
                 if let Err(error) = socket.send_to(&send_buf[..n], meta).await {
@@ -355,4 +479,8 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
             }
         }
     }
+}
+
+fn current_ipv6_octets(stack: Stack<'static>) -> Option<[u8; 16]> {
+    stack.config_v6().map(|cfg| cfg.address.address().octets())
 }

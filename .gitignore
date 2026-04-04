@@ -29,3 +29,6 @@ TODO
 
 # Local Cargo secrets/config overrides (Wi-Fi credentials)
 .cargo/config.local.toml
+
+# Local runtime/build secrets at repo root
+config.local.toml

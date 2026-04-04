@@ -4,17 +4,16 @@
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, Ordering};
 use critical_section::Mutex;
-use embedded_storage::{ReadStorage, Storage};
-use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
-use esp_hal::peripherals::FLASH;
-use esp_storage::FlashStorage;
-use static_cell::ConstStaticCell;
 
 use super::error::SensorError;
-use super::{error, shared};
+use super::shared;
 
-// Type alias for backward compatibility; PersistError is now StorageError from error.rs
-pub use error::StorageError as PersistError;
+// Re-export items from storage so existing callers are unaffected.
+pub use super::storage::{
+    ProbeNameError, RuntimeSample, TEMP_PROBE_NAME_MAX_LEN, clear_history_persistent,
+    get_target_temp_c, history_sample_interval_secs, history_snapshot, history_total_samples,
+    init_persistent_target, set_target_temp_c_persistent, set_temp_probe_name, temp_probe_name,
+};
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
@@ -59,14 +58,41 @@ pub fn sensor_status_label(code: u8) -> &'static str {
     SensorStatus::from_u8(code).label()
 }
 
-const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
-const TARGET_TEMP_MIN_CENTI: i32 = 0;
-const TARGET_TEMP_MAX_CENTI: i32 = 15_000;
-pub const TEMP_PROBE_NAME_MAX_LEN: usize = 32;
-const TARGET_STORE_MAGIC: [u8; 4] = *b"BRWT";
-const TARGET_STORE_VERSION: u8 = 1;
-const TARGET_STORE_SIZE: usize = 9;
-const TARGET_PARTITION_LABEL: &str = "cfg";
+pub fn runtime_error_active() -> bool {
+    // Check if the primary sensor (index 0) has an error
+    LAST_SENSOR_STATUS[0].load(Ordering::Relaxed) != SensorStatus::None as u8
+}
+
+/// Get the primary (first) sensor temperature in centidegrees
+pub fn primary_temp_centi() -> i32 {
+    LAST_TEMP_CENTI[0].load(Ordering::Relaxed)
+}
+
+/// Get a specific sensor's temperature in centidegrees
+pub fn sensor_temp_centi(index: usize) -> i32 {
+    if index < MAX_SENSORS {
+        LAST_TEMP_CENTI[index].load(Ordering::Relaxed)
+    } else {
+        UNKNOWN_TEMPERATURE_CENTI
+    }
+}
+
+/// Get the primary sensor's status code
+pub fn primary_sensor_status() -> u8 {
+    LAST_SENSOR_STATUS[0].load(Ordering::Relaxed)
+}
+
+/// Get a specific sensor's status code
+pub fn sensor_status(index: usize) -> u8 {
+    if index < MAX_SENSORS {
+        LAST_SENSOR_STATUS[index].load(Ordering::Relaxed)
+    } else {
+        SensorStatus::NoDevice as u8
+    }
+}
+
+pub const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
+
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum NetState {
@@ -88,17 +114,29 @@ impl NetState {
 }
 
 const NTP_MAX_TRACKED_PEERS: usize = shared::NTP_MAX_CONFIG_SERVERS + 1;
+pub const MAX_SENSORS: usize = 3;
 
-static LAST_TEMP_CENTI: AtomicI32 = AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI);
+static LAST_TEMP_CENTI: [AtomicI32; MAX_SENSORS] = [
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+    AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
+];
 static LAST_PID_OUTPUT_DECI_PERCENT: AtomicU16 = AtomicU16::new(0);
 static LAST_RELAY_ON: AtomicBool = AtomicBool::new(false);
-static LAST_SENSOR_STATUS: AtomicU8 = AtomicU8::new(SensorStatus::NoDevice as u8);
+static LAST_SENSOR_STATUS: [AtomicU8; MAX_SENSORS] = [
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+    AtomicU8::new(SensorStatus::NoDevice as u8),
+];
 static LAST_LED_RED: AtomicU8 = AtomicU8::new(0);
 static LAST_LED_GREEN: AtomicU8 = AtomicU8::new(0);
 static LAST_LED_BLUE: AtomicU8 = AtomicU8::new(0);
-static HTTP_REQUEST_ACTIVITY: AtomicBool = AtomicBool::new(false);
+static HTTP_EXCHANGE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static HTTP_EXCHANGE_ERROR: AtomicBool = AtomicBool::new(false);
+static HTTP_LED_ACTIVE_UNTIL_TICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(0));
 static LAST_PID_WINDOW_STEP: AtomicU8 = AtomicU8::new(0);
 static LAST_PID_ON_STEPS: AtomicU8 = AtomicU8::new(0);
+static COLLECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 // Device IP packed as big-endian u32; use .to_be_bytes() to recover [u8; 4].
 static LAST_IP: AtomicU32 = AtomicU32::new(0);
 static LAST_IP_VALID: AtomicBool = AtomicBool::new(false);
@@ -114,119 +152,13 @@ static NTP_SERVER_SOURCE: AtomicU8 = AtomicU8::new(0);
 static NTP_SERVER_IP: AtomicU32 = AtomicU32::new(0);
 static NTP_PEERS: Mutex<RefCell<[Option<NtpPeerState>; NTP_MAX_TRACKED_PEERS]>> =
     Mutex::new(RefCell::new([None; NTP_MAX_TRACKED_PEERS]));
-// Runtime-settable target temperature stored as centidegrees (2111 = 21.11°C = 70°F).
-static TARGET_TEMP_CENTI: AtomicI32 = AtomicI32::new(2111);
-static TARGET_STORE_OFFSET: AtomicU32 = AtomicU32::new(0);
-static TARGET_STORE_PARTITION_LEN: AtomicU32 = AtomicU32::new(0);
-static TEMP_PROBE_NAME: Mutex<RefCell<heapless::String<TEMP_PROBE_NAME_MAX_LEN>>> =
-    Mutex::new(RefCell::new(heapless::String::new()));
-static FLASH_STORAGE: Mutex<RefCell<Option<FlashStorage<'static>>>> =
-    Mutex::new(RefCell::new(None));
-static PARTITION_TABLE_BUFFER: ConstStaticCell<[u8; PARTITION_TABLE_MAX_LEN]> =
-    ConstStaticCell::new([0; PARTITION_TABLE_MAX_LEN]);
 
-fn valid_target_centi(target_centi: i32) -> bool {
-    (TARGET_TEMP_MIN_CENTI..=TARGET_TEMP_MAX_CENTI).contains(&target_centi)
+pub fn collection_enabled() -> bool {
+    COLLECTION_ENABLED.load(Ordering::Relaxed)
 }
 
-#[allow(
-    clippy::large_stack_frames,
-    reason = "partition table parsing requires a fixed-size temporary buffer"
-)]
-pub fn init_persistent_target(flash: FLASH<'static>) -> Option<f32> {
-    let mut storage = FlashStorage::new(flash);
-    let mut loaded = None;
-    let partition_table_buf = PARTITION_TABLE_BUFFER.take();
-
-    if let Ok(partition_table) = read_partition_table(&mut storage, partition_table_buf) {
-        for entry in partition_table.iter() {
-            if entry.label_as_str() == TARGET_PARTITION_LABEL {
-                TARGET_STORE_OFFSET.store(entry.offset(), Ordering::Relaxed);
-                TARGET_STORE_PARTITION_LEN.store(entry.len(), Ordering::Relaxed);
-                break;
-            }
-        }
-    }
-
-    let store_offset = TARGET_STORE_OFFSET.load(Ordering::Relaxed);
-    let store_len = TARGET_STORE_PARTITION_LEN.load(Ordering::Relaxed);
-
-    if store_len >= TARGET_STORE_SIZE as u32 {
-        let mut raw = [0u8; TARGET_STORE_SIZE];
-        if storage.read(store_offset, &mut raw).is_ok()
-            && raw[0..4] == TARGET_STORE_MAGIC
-            && raw[4] == TARGET_STORE_VERSION
-        {
-            let target_centi = i32::from_le_bytes([raw[5], raw[6], raw[7], raw[8]]);
-            if valid_target_centi(target_centi) {
-                TARGET_TEMP_CENTI.store(target_centi, Ordering::Relaxed);
-                loaded = Some(target_centi as f32 / 100.0);
-            }
-        }
-    }
-
-    critical_section::with(|cs| {
-        FLASH_STORAGE.borrow_ref_mut(cs).replace(storage);
-    });
-
-    loaded
-}
-
-pub fn get_target_temp_c() -> f32 {
-    TARGET_TEMP_CENTI.load(Ordering::Relaxed) as f32 / 100.0
-}
-
-pub fn set_target_temp_c_persistent(target_c: f32) -> Result<(), PersistError> {
-    let scaled = target_c * 100.0;
-    let target_centi = if scaled >= 0.0 {
-        (scaled + 0.5) as i32
-    } else {
-        (scaled - 0.5) as i32
-    };
-    if !valid_target_centi(target_centi) {
-        return Err(PersistError::OutOfRange);
-    }
-
-    TARGET_TEMP_CENTI.store(target_centi, Ordering::Relaxed);
-    persist_target_temp_c(target_centi)
-}
-
-fn persist_target_temp_c(target_centi: i32) -> Result<(), PersistError> {
-    let store_offset = TARGET_STORE_OFFSET.load(Ordering::Relaxed);
-    let store_len = TARGET_STORE_PARTITION_LEN.load(Ordering::Relaxed);
-
-    if store_len == 0 {
-        return Err(PersistError::MissingPartition);
-    }
-    if store_len < TARGET_STORE_SIZE as u32 {
-        return Err(PersistError::PartitionTooSmall);
-    }
-
-    critical_section::with(|cs| {
-        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
-        let Some(storage) = guard.as_mut() else {
-            return Err(PersistError::NotInitialized);
-        };
-
-        let mut raw = [0u8; TARGET_STORE_SIZE];
-        raw[0..4].copy_from_slice(&TARGET_STORE_MAGIC);
-        raw[4] = TARGET_STORE_VERSION;
-        raw[5..9].copy_from_slice(&target_centi.to_le_bytes());
-
-        storage.write(store_offset, &raw)?;
-        Ok(())
-    })
-}
-
-pub struct RuntimeSample {
-    pub temp_c: f32,
-    pub pid_output: f32,
-    pub heating_on: bool,
-    pub led_red: u8,
-    pub led_green: u8,
-    pub led_blue: u8,
-    pub pid_window_step: u8,
-    pub pid_on_steps: u8,
+pub fn set_collection_enabled(enabled: bool) {
+    COLLECTION_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 #[derive(Clone, Copy)]
@@ -287,6 +219,7 @@ pub struct MetricsSnapshot {
     pub temp_centi: i32,
     pub pid_deci: u16,
     pub relay_on: bool,
+    pub collection_enabled: bool,
     pub sensor_status_code: u8,
     pub led_red: u8,
     pub led_green: u8,
@@ -321,53 +254,6 @@ pub struct PrometheusSnapshot {
     pub ntp_uptime_at_sync: u32,
     pub master_ip: [u8; 4],
     pub probe_name: heapless::String<TEMP_PROBE_NAME_MAX_LEN>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum ProbeNameError {
-    Empty,
-    TooLong,
-    InvalidChar,
-}
-
-fn is_valid_probe_name_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.')
-}
-
-pub fn set_temp_probe_name(name: &str) -> Result<(), ProbeNameError> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err(ProbeNameError::Empty);
-    }
-    if trimmed.len() > TEMP_PROBE_NAME_MAX_LEN {
-        return Err(ProbeNameError::TooLong);
-    }
-    if !trimmed.chars().all(is_valid_probe_name_char) {
-        return Err(ProbeNameError::InvalidChar);
-    }
-
-    let mut normalized = heapless::String::<TEMP_PROBE_NAME_MAX_LEN>::new();
-    normalized
-        .push_str(trimmed)
-        .map_err(|_| ProbeNameError::TooLong)?;
-
-    critical_section::with(|cs| {
-        *TEMP_PROBE_NAME.borrow_ref_mut(cs) = normalized;
-    });
-    Ok(())
-}
-
-pub fn temp_probe_name() -> heapless::String<TEMP_PROBE_NAME_MAX_LEN> {
-    critical_section::with(|cs| {
-        let current = TEMP_PROBE_NAME.borrow_ref(cs);
-        if current.is_empty() {
-            let mut fallback = heapless::String::new();
-            let _ = fallback.push_str("probe-1");
-            fallback
-        } else {
-            current.clone()
-        }
-    })
 }
 
 fn clear_ntp_peers_by_source(source: shared::NtpSource) {
@@ -442,17 +328,18 @@ pub fn ntp_peers_snapshot() -> heapless::Vec<NtpPeerSnapshot, { shared::NTP_MAX_
 
 /// Snapshot all metric state needed for JSON and text formatting.
 pub fn metrics_snapshot() -> MetricsSnapshot {
-    let temp_centi = LAST_TEMP_CENTI.load(Ordering::Relaxed);
+    let temp_centi = primary_temp_centi();
     let pid_deci = LAST_PID_OUTPUT_DECI_PERCENT.load(Ordering::Relaxed);
     let relay_on = LAST_RELAY_ON.load(Ordering::Relaxed);
-    let sensor_status_code = LAST_SENSOR_STATUS.load(Ordering::Relaxed);
+    let collection_enabled = COLLECTION_ENABLED.load(Ordering::Relaxed);
+    let sensor_status_code = primary_sensor_status();
     let led_red = LAST_LED_RED.load(Ordering::Relaxed);
     let led_green = LAST_LED_GREEN.load(Ordering::Relaxed);
     let led_blue = LAST_LED_BLUE.load(Ordering::Relaxed);
     let pid_window_step = LAST_PID_WINDOW_STEP.load(Ordering::Relaxed);
     let pid_on_steps = LAST_PID_ON_STEPS.load(Ordering::Relaxed);
 
-    let target_c = TARGET_TEMP_CENTI.load(Ordering::Relaxed) as f32 / 100.0;
+    let target_c = super::storage::get_target_temp_c();
     let target_f = target_c * 9.0 / 5.0 + 32.0;
     let ip_valid = LAST_IP_VALID.load(Ordering::Relaxed);
     let net_state_code = LAST_NET_STATE.load(Ordering::Relaxed);
@@ -472,6 +359,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
         temp_centi,
         pid_deci,
         relay_on,
+        collection_enabled,
         sensor_status_code,
         led_red,
         led_green,
@@ -495,13 +383,13 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
 
 /// Snapshot all metric state needed for Prometheus formatting.
 pub fn prometheus_snapshot() -> PrometheusSnapshot {
-    let temp_centi = LAST_TEMP_CENTI.load(Ordering::Relaxed);
+    let temp_centi = primary_temp_centi();
     let pid_deci = LAST_PID_OUTPUT_DECI_PERCENT.load(Ordering::Relaxed);
     let pid_window_step = LAST_PID_WINDOW_STEP.load(Ordering::Relaxed);
     let pid_on_steps = LAST_PID_ON_STEPS.load(Ordering::Relaxed);
     let relay_on = LAST_RELAY_ON.load(Ordering::Relaxed);
 
-    let target_c = TARGET_TEMP_CENTI.load(Ordering::Relaxed) as f32 / 100.0;
+    let target_c = super::storage::get_target_temp_c();
     let target_f = target_c * 9.0 / 5.0 + 32.0;
     let ntp_synced = NTP_SYNCED.load(Ordering::Relaxed);
     let ntp_sync_count = NTP_SYNC_COUNT.load(Ordering::Relaxed);
@@ -540,27 +428,64 @@ fn mark_ip_invalid(state: NetState) {
 }
 
 pub fn update_success(sample: RuntimeSample) {
-    LAST_TEMP_CENTI.store((sample.temp_c * 100.0) as i32, Ordering::Relaxed);
+    // Update primary sensor (index 0) with current reading
+    LAST_TEMP_CENTI[0].store((sample.temp_c * 100.0) as i32, Ordering::Relaxed);
     LAST_PID_OUTPUT_DECI_PERCENT.store((sample.pid_output * 10.0) as u16, Ordering::Relaxed);
     LAST_RELAY_ON.store(sample.heating_on, Ordering::Relaxed);
-    LAST_SENSOR_STATUS.store(SensorStatus::None as u8, Ordering::Relaxed);
+    LAST_SENSOR_STATUS[0].store(SensorStatus::None as u8, Ordering::Relaxed);
     LAST_LED_RED.store(sample.led_red, Ordering::Relaxed);
     LAST_LED_GREEN.store(sample.led_green, Ordering::Relaxed);
     LAST_LED_BLUE.store(sample.led_blue, Ordering::Relaxed);
     LAST_PID_WINDOW_STEP.store(sample.pid_window_step, Ordering::Relaxed);
     LAST_PID_ON_STEPS.store(sample.pid_on_steps, Ordering::Relaxed);
+    if collection_enabled() {
+        // Map UNKNOWN_TEMPERATURE_CENTI (i32::MIN) to i32::MAX so that missing
+        // sensor readings are stored as the NaN sentinel rather than as
+        // an invalid −327.68 °C temperature.
+        let map = |v: i32| {
+            if v == UNKNOWN_TEMPERATURE_CENTI {
+                i32::MAX
+            } else {
+                v
+            }
+        };
+        let extra_temps_centi = [
+            map(sensor_temp_centi(1)),
+            map(sensor_temp_centi(2)),
+            map(sensor_temp_centi(3)),
+        ];
+        super::storage::persist_history_sample(&sample, &extra_temps_centi);
+    }
 }
 
 pub fn update_error(error: SensorError, led_red: u8, led_green: u8, led_blue: u8) {
-    LAST_TEMP_CENTI.store(UNKNOWN_TEMPERATURE_CENTI, Ordering::Relaxed);
+    LAST_TEMP_CENTI[0].store(UNKNOWN_TEMPERATURE_CENTI, Ordering::Relaxed);
     LAST_PID_OUTPUT_DECI_PERCENT.store(0, Ordering::Relaxed);
     LAST_RELAY_ON.store(false, Ordering::Relaxed);
-    LAST_SENSOR_STATUS.store(SensorStatus::from(error) as u8, Ordering::Relaxed);
+    LAST_SENSOR_STATUS[0].store(SensorStatus::from(error) as u8, Ordering::Relaxed);
     LAST_LED_RED.store(led_red, Ordering::Relaxed);
     LAST_LED_GREEN.store(led_green, Ordering::Relaxed);
     LAST_LED_BLUE.store(led_blue, Ordering::Relaxed);
     LAST_PID_WINDOW_STEP.store(0, Ordering::Relaxed);
     LAST_PID_ON_STEPS.store(0, Ordering::Relaxed);
+}
+
+/// Update a specific sensor's reading (for auxiliary sensors)
+#[allow(dead_code)]
+pub fn update_sensor(sensor_index: usize, temp_c: f32) {
+    if sensor_index < MAX_SENSORS {
+        LAST_TEMP_CENTI[sensor_index].store((temp_c * 100.0) as i32, Ordering::Relaxed);
+        LAST_SENSOR_STATUS[sensor_index].store(SensorStatus::None as u8, Ordering::Relaxed);
+    }
+}
+
+/// Report an error for a specific sensor
+#[allow(dead_code)]
+pub fn update_sensor_error(sensor_index: usize, error: SensorError) {
+    if sensor_index < MAX_SENSORS {
+        LAST_TEMP_CENTI[sensor_index].store(UNKNOWN_TEMPERATURE_CENTI, Ordering::Relaxed);
+        LAST_SENSOR_STATUS[sensor_index].store(SensorStatus::from(error) as u8, Ordering::Relaxed);
+    }
 }
 
 pub fn update_led(led_red: u8, led_green: u8, led_blue: u8) {
@@ -734,12 +659,53 @@ pub fn mark_ntp_peer_query_failed(source: shared::NtpSource, server: [u8; 4]) {
     });
 }
 
-pub fn http_request_received() {
-    HTTP_REQUEST_ACTIVITY.store(true, Ordering::Relaxed);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HttpLedState {
+    Idle,
+    ActiveOk,
+    ActiveError,
 }
 
-pub fn http_request_activity() -> bool {
-    HTTP_REQUEST_ACTIVITY.swap(false, Ordering::Relaxed)
+const HTTP_LED_HOLD_MS: u64 = 1_200;
+
+pub fn http_exchange_begin() {
+    let now_ticks = embassy_time::Instant::now().as_ticks();
+    let hold_ticks = HTTP_LED_HOLD_MS.saturating_mul(embassy_time::TICK_HZ) / 1_000;
+    critical_section::with(|cs| {
+        HTTP_LED_ACTIVE_UNTIL_TICKS
+            .borrow(cs)
+            .set(now_ticks.saturating_add(hold_ticks));
+    });
+    HTTP_EXCHANGE_ERROR.store(false, Ordering::Relaxed);
+    HTTP_EXCHANGE_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+pub fn http_exchange_mark_error() {
+    if HTTP_EXCHANGE_ACTIVE.load(Ordering::Relaxed) {
+        HTTP_EXCHANGE_ERROR.store(true, Ordering::Relaxed);
+    }
+}
+
+pub fn http_exchange_end() {
+    HTTP_EXCHANGE_ACTIVE.store(false, Ordering::Relaxed);
+    HTTP_EXCHANGE_ERROR.store(false, Ordering::Relaxed);
+}
+
+pub fn http_led_state() -> HttpLedState {
+    if HTTP_EXCHANGE_ACTIVE.load(Ordering::Relaxed) && HTTP_EXCHANGE_ERROR.load(Ordering::Relaxed) {
+        HttpLedState::ActiveError
+    } else if HTTP_EXCHANGE_ACTIVE.load(Ordering::Relaxed) {
+        HttpLedState::ActiveOk
+    } else {
+        let now_ticks = embassy_time::Instant::now().as_ticks();
+        let active_until =
+            critical_section::with(|cs| HTTP_LED_ACTIVE_UNTIL_TICKS.borrow(cs).get());
+        if now_ticks < active_until {
+            HttpLedState::ActiveOk
+        } else {
+            HttpLedState::Idle
+        }
+    }
 }
 
 pub fn current_unix_time_micros() -> Option<u64> {

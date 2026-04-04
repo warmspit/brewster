@@ -120,28 +120,28 @@ fn append_ntp_peer_json(
     reason = "JSON formatting uses large local buffers in this no_std telemetry path"
 )]
 pub fn json() -> String {
-    let snapshot = status::metrics_snapshot();
-    let temp_centi = snapshot.temp_centi;
-    let pid_deci = snapshot.pid_deci;
-    let relay_on = snapshot.relay_on;
-    let sensor_status_code = snapshot.sensor_status_code;
-    let led_red = snapshot.led_red;
-    let led_green = snapshot.led_green;
-    let led_blue = snapshot.led_blue;
-    let pid_window_step = snapshot.pid_window_step;
-    let pid_on_steps = snapshot.pid_on_steps;
-    let target_c = snapshot.target_c;
-    let target_f = snapshot.target_f;
-    let ip_valid = snapshot.ip_valid;
-    let net_state_code = snapshot.net_state_code;
-    let ip_octets = snapshot.ip_octets;
-    let ntp_synced = snapshot.ntp_synced;
-    let ntp_sync_count = snapshot.ntp_sync_count;
-    let ntp_source_code = snapshot.ntp_source_code;
-    let ntp_uptime_at_sync = snapshot.ntp_uptime_at_sync;
-    let current_ntp_time = snapshot.current_ntp_time;
-    let master_ip = snapshot.master_ip;
-    let probe_name = snapshot.probe_name;
+    let status::MetricsSnapshot {
+        pid_deci,
+        relay_on,
+        collection_enabled,
+        led_red,
+        led_green,
+        led_blue,
+        pid_window_step,
+        pid_on_steps,
+        target_c,
+        target_f,
+        ip_valid,
+        net_state_code,
+        ip_octets,
+        ntp_synced,
+        ntp_sync_count,
+        ntp_source_code,
+        ntp_uptime_at_sync,
+        current_ntp_time,
+        master_ip,
+        ..
+    } = status::metrics_snapshot();
 
     let ntp_source = shared::NtpSource::from_u8(ntp_source_code);
     let net_state = status::NetState::from_u8(net_state_code);
@@ -165,47 +165,78 @@ pub fn json() -> String {
     let selected_master_offset_us = selected_peer.and_then(|peer| peer.offset_us);
     let selected_master_offset_jitter_us = selected_peer.and_then(|peer| peer.offset_jitter_us);
 
-    const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
-    let temp_cf = if temp_centi == UNKNOWN_TEMPERATURE_CENTI {
-        None
-    } else {
-        let c = temp_centi as f32 / 100.0;
-        let f = c * 9.0 / 5.0 + 32.0;
-        Some((c, f))
-    };
-
     let mut out = String::with_capacity(JSON_STATUS_CAPACITY);
     let _ = write!(
         out,
-        concat!(
-            "{{\n",
-            "  \"device\": \"{}\",\n",
-            "  \"sensor\": {{\n",
-            "    \"ds18b20\": {{\n",
-            "      \"name\": \"{}\",\n",
-            "      \"temperature_c\": ",
-        ),
+        concat!("{{\n", "  \"device\": \"{}\",\n", "  \"sensors\": [\n",),
         device_hostname(),
-        probe_name,
     );
-    if let Some((temp_c, _)) = temp_cf {
-        let _ = write!(out, "{:.2}", temp_c);
-    } else {
-        out.push_str("null");
+
+    // Emit exactly 3 sensors (indices 0, 1, 2) — matching MAX_SENSORS.
+    for sensor_idx in 0..status::MAX_SENSORS {
+        if sensor_idx > 0 {
+            out.push_str(",\n");
+        }
+
+        let sensor_temp_centi = status::sensor_temp_centi(sensor_idx);
+        let sensor_status_code = status::sensor_status(sensor_idx);
+        let sensor_name = match sensor_idx {
+            0 => super::config::SENSORS
+                .first()
+                .map(|s| s.name)
+                .unwrap_or("probe-1"),
+            1 => super::config::SENSORS
+                .get(1)
+                .map(|s| s.name)
+                .unwrap_or("probe-2"),
+            2 => super::config::SENSORS
+                .get(2)
+                .map(|s| s.name)
+                .unwrap_or("probe-3"),
+            _ => "unknown",
+        };
+
+        let temp_cf = if sensor_temp_centi == status::UNKNOWN_TEMPERATURE_CENTI {
+            None
+        } else {
+            let c = sensor_temp_centi as f32 / 100.0;
+            let f = c * 9.0 / 5.0 + 32.0;
+            Some((c, f))
+        };
+
+        out.push_str("    {\n");
+        let _ = write!(
+            out,
+            concat!(
+                "      \"index\": {},\n",
+                "      \"name\": \"{}\",\n",
+                "      \"temperature_c\": ",
+            ),
+            sensor_idx, sensor_name,
+        );
+        if let Some((temp_c, _)) = temp_cf {
+            let _ = write!(out, "{:.2}", temp_c);
+        } else {
+            out.push_str("null");
+        }
+        out.push_str(",\n      \"temperature_f\": ");
+        if let Some((_, temp_f)) = temp_cf {
+            let _ = write!(out, "{:.2}", temp_f);
+        } else {
+            out.push_str("null");
+        }
+        let _ = write!(
+            out,
+            ",\n      \"error\": \"{}\"\n    }}",
+            status::sensor_status_label(sensor_status_code),
+        );
     }
-    out.push_str(",\n      \"temperature_f\": ");
-    if let Some((_, temp_f)) = temp_cf {
-        let _ = write!(out, "{:.2}", temp_f);
-    } else {
-        out.push_str("null");
-    }
+
     let _ = write!(
         out,
         concat!(
-            ",\n",
-            "      \"error\": \"{}\"\n",
-            "    }}\n",
-            "  }},\n",
+            "\n  ],\n",
+            "  \"control_probe_index\": {},\n",
             "  \"pid\": {{\n",
             "    \"target_c\": {:.1},\n",
             "    \"target_f\": {:.1},\n",
@@ -225,7 +256,7 @@ pub fn json() -> String {
             "  \"system\": {{\n",
             "    \"ip\": ",
         ),
-        status::sensor_status_label(sensor_status_code),
+        super::config::CONTROL_PROBE_INDEX,
         target_c,
         target_f,
         PID_KP,
@@ -254,10 +285,12 @@ pub fn json() -> String {
         out,
         concat!(
             ",\n",
+            "    \"collecting\": {},\n",
             "    \"ntp\": {{\n",
             "      \"synced\": {},\n",
             "      \"time\": ",
         ),
+        if collection_enabled { "true" } else { "false" },
         if ntp_synced { "true" } else { "false" },
     );
     if let Some(secs) = current_ntp_time {
@@ -417,26 +450,73 @@ pub fn json() -> String {
     out
 }
 
+pub fn history_json(max_points: usize) -> String {
+    let points = status::history_snapshot(max_points);
+    let mut out = String::with_capacity(256 + points.len().saturating_mul(64));
+    let _ = write!(
+        out,
+        concat!(
+            "{{\n",
+            "  \"sample_interval_s\": {},\n",
+            "  \"total_samples\": {},\n",
+            "  \"points\": ["
+        ),
+        status::history_sample_interval_secs(),
+        status::history_total_samples(),
+    );
+
+    for (idx, point) in points.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        // Columns: [seq, temp_c, target_c, output_pct, window_step, on_steps, relay_on, extra_temp_1, ...]
+        let _ = write!(
+            out,
+            "\n    [{},{:.2},{:.2},{:.1},{},{},{}",
+            point.seq,
+            point.temp_c,
+            point.target_c,
+            point.output_percent,
+            point.window_step,
+            point.on_steps,
+            if point.relay_on { 1 } else { 0 },
+        );
+        for &et in point.extra_temps.iter() {
+            if et.is_nan() {
+                out.push_str(",null");
+            } else {
+                let _ = write!(out, ",{:.2}", et);
+            }
+        }
+        out.push(']');
+    }
+
+    out.push_str("\n  ]\n}\n");
+    out
+}
+
 /// Serialize device state as human-readable text.
 #[allow(
     clippy::large_stack_frames,
     reason = "status text formatting builds multi-argument fmt state on stack"
 )]
 pub fn text() -> String {
-    let snapshot = status::metrics_snapshot();
-    let temp_centi = snapshot.temp_centi;
-    let pid_deci = snapshot.pid_deci;
-    let relay_on = snapshot.relay_on;
-    let sensor_status_code = snapshot.sensor_status_code;
-    let led_red = snapshot.led_red;
-    let led_green = snapshot.led_green;
-    let led_blue = snapshot.led_blue;
-    let target_c = snapshot.target_c;
-    let target_f = snapshot.target_f;
-    let ip_valid = snapshot.ip_valid;
-    let net_state_code = snapshot.net_state_code;
-    let ip_octets = snapshot.ip_octets;
-    let probe_name = snapshot.probe_name;
+    let status::MetricsSnapshot {
+        temp_centi,
+        pid_deci,
+        relay_on,
+        sensor_status_code,
+        led_red,
+        led_green,
+        led_blue,
+        target_c,
+        target_f,
+        ip_valid,
+        net_state_code,
+        ip_octets,
+        probe_name,
+        ..
+    } = status::metrics_snapshot();
 
     let net_state = status::NetState::from_u8(net_state_code);
 
@@ -452,8 +532,7 @@ pub fn text() -> String {
         });
     }
 
-    const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
-    if temp_centi == UNKNOWN_TEMPERATURE_CENTI {
+    if temp_centi == status::UNKNOWN_TEMPERATURE_CENTI {
         let _ = write!(
             out,
             " probe={} sensor={} target={:.1}C/{:.1}F pid={:.1}% relay={} led=({}, {}, {}) heap_free={}B",
@@ -500,20 +579,21 @@ pub fn text() -> String {
     reason = "Prometheus serialization accumulates many labels and temporary values"
 )]
 pub fn prometheus() -> String {
-    let snapshot = status::prometheus_snapshot();
-    let temp_centi = snapshot.temp_centi;
-    let pid_deci = snapshot.pid_deci;
-    let pid_window_step = snapshot.pid_window_step;
-    let pid_on_steps = snapshot.pid_on_steps;
-    let relay_on = snapshot.relay_on;
-    let target_c = snapshot.target_c;
-    let target_f = snapshot.target_f;
-    let ntp_synced = snapshot.ntp_synced;
-    let ntp_sync_count = snapshot.ntp_sync_count;
-    let ntp_source_code = snapshot.ntp_source_code;
-    let ntp_uptime_at_sync = snapshot.ntp_uptime_at_sync;
-    let master_ip = snapshot.master_ip;
-    let probe_name = snapshot.probe_name;
+    let status::PrometheusSnapshot {
+        temp_centi,
+        pid_deci,
+        pid_window_step,
+        pid_on_steps,
+        relay_on,
+        target_c,
+        target_f,
+        ntp_synced,
+        ntp_sync_count,
+        ntp_source_code,
+        ntp_uptime_at_sync,
+        master_ip,
+        probe_name,
+    } = status::prometheus_snapshot();
 
     let ntp_source = shared::NtpSource::from_u8(ntp_source_code);
 
@@ -632,8 +712,7 @@ pub fn prometheus() -> String {
         "# HELP brewster_sensor_temperature_valid 1 when a valid sensor reading is present.\n",
     );
     out.push_str("# TYPE brewster_sensor_temperature_valid gauge\n");
-    const UNKNOWN_TEMPERATURE_CENTI: i32 = i32::MIN;
-    let has_temp = temp_centi != UNKNOWN_TEMPERATURE_CENTI;
+    let has_temp = temp_centi != status::UNKNOWN_TEMPERATURE_CENTI;
     let _ = writeln!(
         out,
         "brewster_sensor_temperature_valid {}",
@@ -977,5 +1056,8 @@ pub fn prometheus() -> String {
         }
     }
 
-    out
+    // Replace the hardcoded "brewster_" prefix with the device hostname across
+    // all HELP, TYPE, and sample lines so metrics are named after the device.
+    let prefix = alloc::format!("{}_", device_hostname());
+    out.replace("brewster_", &prefix)
 }
