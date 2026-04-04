@@ -24,7 +24,7 @@ const TARGET_STORE_MAGIC: [u8; 4] = *b"BRWT";
 const TARGET_STORE_VERSION: u8 = 1;
 const TARGET_STORE_SIZE: usize = 9;
 const TARGET_PARTITION_LABEL: &str = "cfg";
-const HISTORY_RECORD_SIZE: u32 = 32;
+const HISTORY_RECORD_SIZE: u32 = 16;
 /// Number of extra (non-control) sensor temperatures stored per record.
 const HISTORY_EXTRA_SENSOR_COUNT: usize = 3;
 /// Sentinel i16 value meaning "no reading available" for an extra sensor slot.
@@ -166,7 +166,9 @@ pub(crate) fn persist_history_sample(sample: &RuntimeSample, extra_temps_centi: 
 
     let target_centi = TARGET_TEMP_CENTI.load(Ordering::Relaxed) as i16;
     let temp_centi = (sample.temp_c * 100.0) as i16;
-    let output_deci = (sample.pid_output * 10.0) as u16;
+    // output: 1 % resolution (u8 0–100); window/on_steps packed into nibbles of flags byte.
+    let output_pct = sample.pid_output.clamp(0.0, 100.0) as u8;
+    let flags = (sample.pid_window_step.min(15) << 4) | sample.pid_on_steps.min(15);
 
     // Encode extra sensor temps; sentinel i16::MAX when reading is unavailable.
     let mut extra_centi = [HISTORY_EXTRA_SENSOR_NONE; HISTORY_EXTRA_SENSOR_COUNT];
@@ -196,18 +198,17 @@ pub(crate) fn persist_history_sample(sample: &RuntimeSample, extra_temps_centi: 
         }
 
         let seq = HISTORY_NEXT_SEQ.load(Ordering::Relaxed);
-        // Record layout (32 bytes):
+        // Record layout (16 bytes):
         //  [0..4]   seq: u32 LE
-        //  [4..6]   temp_centi[0]: i16 LE  (control probe)
+        //  [4..6]   temp_centi[0]: i16 LE  (control probe; i16::MAX = no reading)
         //  [6..8]   temp_centi[1]: i16 LE  (sensor 1; i16::MAX = no reading)
         //  [8..10]  temp_centi[2]: i16 LE  (sensor 2; i16::MAX = no reading)
         //  [10..12] temp_centi[3]: i16 LE  (sensor 3; i16::MAX = no reading)
         //  [12..14] target_centi: i16 LE
-        //  [14..16] output_deci: u16 LE
-        //  [16]     window_step: u8
-        //  [17]     on_steps: u8
-        //  [18]     relay_on: u8
-        //  [19..32] 0xFF padding
+        //  [14]     output_pct: u8          (0–100 %)
+        //  [15]     flags: u8               hi-nibble = window_step (0–15),
+        //                                   lo-nibble = on_steps (0–15)
+        //           relay_on is derived on read: on_steps > 0 && window_step < on_steps
         let mut raw = [0xFFu8; HISTORY_RECORD_SIZE as usize];
         raw[0..4].copy_from_slice(&seq.to_le_bytes());
         raw[4..6].copy_from_slice(&temp_centi.to_le_bytes());
@@ -215,10 +216,8 @@ pub(crate) fn persist_history_sample(sample: &RuntimeSample, extra_temps_centi: 
         raw[8..10].copy_from_slice(&extra_centi[1].to_le_bytes());
         raw[10..12].copy_from_slice(&extra_centi[2].to_le_bytes());
         raw[12..14].copy_from_slice(&target_centi.to_le_bytes());
-        raw[14..16].copy_from_slice(&output_deci.to_le_bytes());
-        raw[16] = sample.pid_window_step;
-        raw[17] = sample.pid_on_steps;
-        raw[18] = if sample.heating_on { 1 } else { 0 };
+        raw[14] = output_pct;
+        raw[15] = flags;
 
         if Storage::write(storage, offset, &raw).is_err() {
             return;
@@ -327,18 +326,23 @@ pub fn history_snapshot(max_points: usize) -> Vec<HistorySample> {
                 let ec2 = i16::from_le_bytes([raw[8], raw[9]]);
                 let ec3 = i16::from_le_bytes([raw[10], raw[11]]);
                 let target_centi = i16::from_le_bytes([raw[12], raw[13]]);
-                let output_deci = u16::from_le_bytes([raw[14], raw[15]]);
+                let window_step = raw[15] >> 4;
+                let on_steps = raw[15] & 0x0F;
                 let decode = |ec: i16| -> f32 {
-                    if ec == HISTORY_EXTRA_SENSOR_NONE { f32::NAN } else { ec as f32 / 100.0 }
+                    if ec == HISTORY_EXTRA_SENSOR_NONE {
+                        f32::NAN
+                    } else {
+                        ec as f32 / 100.0
+                    }
                 };
                 out.push(HistorySample {
                     seq,
                     temp_c: temp_centi as f32 / 100.0,
                     target_c: target_centi as f32 / 100.0,
-                    output_percent: output_deci as f32 / 10.0,
-                    window_step: raw[16],
-                    on_steps: raw[17],
-                    relay_on: raw[18] != 0,
+                    output_percent: raw[14] as f32,
+                    window_step,
+                    on_steps,
+                    relay_on: on_steps > 0 && window_step < on_steps,
                     extra_temps: [decode(ec1), decode(ec2), decode(ec3)],
                 });
             }
