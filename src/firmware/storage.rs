@@ -60,6 +60,7 @@ pub struct RuntimeSample {
     pub temp_c: f32,
     pub pid_output: f32,
     pub heating_on: bool,
+    pub heat_on: bool,
     pub led_red: u8,
     pub led_green: u8,
     pub led_blue: u8,

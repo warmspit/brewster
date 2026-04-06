@@ -16,10 +16,11 @@
 //!  [37..39] temp_centi[2]: i16 LE  (sensor 2;      i16::MAX = no reading)
 //!  [39..41] target_centi: i16 LE
 //!  [41]     output_pct: u8          (0–100 %)
-//!  [42]     flags: u8               bit 0 = relay_on
+//!  [42]     flags: u8               bit 0 = relay_on (cool SSR)
 //!                                   bit 1 = collecting
 //!                                   bit 2 = ntp_synced
 //!                                   bit 3 = history_clear (one-shot)
+//!                                   bit 4 = heat_on (heat SSR)
 //!  [43]     window_step: u8         (0–15)
 //!  [44]     on_steps: u8            (0–15)
 //!  [45]     sensor_status[0]: u8
@@ -55,6 +56,7 @@ pub struct Packet {
     /// Set in the first packet after the device clears its history.
     /// The server uses this to clear its own ring buffer.
     pub history_clear: bool,
+    pub heat_on: bool,
     pub window_step: u8,
     pub on_steps: u8,
     /// Raw status codes per sensor (0 = ok).
@@ -104,6 +106,7 @@ impl Packet {
         let collecting = flags & 0x02 != 0;
         let ntp_synced = flags & 0x04 != 0;
         let history_clear = flags & 0x08 != 0;
+        let heat_on = flags & 0x10 != 0;
         let window_step = buf[43];
         let on_steps = buf[44];
         let sensor_status = [buf[45], buf[46], buf[47]];
@@ -122,6 +125,7 @@ impl Packet {
             collecting,
             ntp_synced,
             history_clear,
+            heat_on,
             window_step,
             on_steps,
             sensor_status,

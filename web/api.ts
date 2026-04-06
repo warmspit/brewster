@@ -25,6 +25,7 @@ export type StatusPayload = {
     window_step: number;
     on_steps: number;
     relay_on: boolean;
+    heat_on?: boolean;
   };
   system: {
     ip: string;

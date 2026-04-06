@@ -327,7 +327,8 @@ fn build_packet() -> [u8; PACKET_SIZE] {
     let flags = (snap.relay_on as u8)
         | ((snap.collection_enabled as u8) << 1)
         | ((snap.ntp_synced as u8) << 2)
-        | ((history_clear as u8) << 3);
+        | ((history_clear as u8) << 3)
+        | ((snap.heat_on as u8) << 4);
 
     let mut buf = [0u8; PACKET_SIZE];
     buf[0..4].copy_from_slice(&PACKET_MAGIC);

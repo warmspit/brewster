@@ -98,6 +98,7 @@ struct PidJson {
     window_step: u8,
     on_steps: u8,
     relay_on: bool,
+    heat_on: bool,
 }
 
 #[derive(Serialize)]
@@ -177,6 +178,7 @@ async fn get_status(
             window_step: pkt.window_step,
             on_steps: pkt.on_steps,
             relay_on: pkt.relay_on,
+            heat_on: pkt.heat_on,
         },
         system: SystemJson {
             ip,

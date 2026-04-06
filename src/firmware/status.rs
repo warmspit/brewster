@@ -125,6 +125,7 @@ static LAST_TEMP_CENTI: [AtomicI32; MAX_SENSORS] = [
 ];
 static LAST_PID_OUTPUT_DECI_PERCENT: AtomicU16 = AtomicU16::new(0);
 static LAST_RELAY_ON: AtomicBool = AtomicBool::new(false);
+static LAST_HEAT_ON: AtomicBool = AtomicBool::new(false);
 static LAST_SENSOR_STATUS: [AtomicU8; MAX_SENSORS] = [
     AtomicU8::new(SensorStatus::NoDevice as u8),
     AtomicU8::new(SensorStatus::NoDevice as u8),
@@ -222,6 +223,7 @@ pub struct MetricsSnapshot {
     pub temp_centi: i32,
     pub pid_deci: u16,
     pub relay_on: bool,
+    pub heat_on: bool,
     pub collection_enabled: bool,
     pub sensor_status_code: u8,
     pub led_red: u8,
@@ -334,6 +336,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
     let temp_centi = primary_temp_centi();
     let pid_deci = LAST_PID_OUTPUT_DECI_PERCENT.load(Ordering::Relaxed);
     let relay_on = LAST_RELAY_ON.load(Ordering::Relaxed);
+    let heat_on = LAST_HEAT_ON.load(Ordering::Relaxed);
     let collection_enabled = COLLECTION_ENABLED.load(Ordering::Relaxed);
     let sensor_status_code = primary_sensor_status();
     let led_red = LAST_LED_RED.load(Ordering::Relaxed);
@@ -362,6 +365,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
         temp_centi,
         pid_deci,
         relay_on,
+        heat_on,
         collection_enabled,
         sensor_status_code,
         led_red,
@@ -435,6 +439,7 @@ pub fn update_success(sample: RuntimeSample) {
     LAST_TEMP_CENTI[0].store((sample.temp_c * 100.0) as i32, Ordering::Relaxed);
     LAST_PID_OUTPUT_DECI_PERCENT.store((sample.pid_output * 10.0) as u16, Ordering::Relaxed);
     LAST_RELAY_ON.store(sample.heating_on, Ordering::Relaxed);
+    LAST_HEAT_ON.store(sample.heat_on, Ordering::Relaxed);
     LAST_SENSOR_STATUS[0].store(SensorStatus::None as u8, Ordering::Relaxed);
     LAST_LED_RED.store(sample.led_red, Ordering::Relaxed);
     LAST_LED_GREEN.store(sample.led_green, Ordering::Relaxed);
@@ -465,6 +470,7 @@ pub fn update_error(error: SensorError, led_red: u8, led_green: u8, led_blue: u8
     LAST_TEMP_CENTI[0].store(UNKNOWN_TEMPERATURE_CENTI, Ordering::Relaxed);
     LAST_PID_OUTPUT_DECI_PERCENT.store(0, Ordering::Relaxed);
     LAST_RELAY_ON.store(false, Ordering::Relaxed);
+    LAST_HEAT_ON.store(false, Ordering::Relaxed);
     LAST_SENSOR_STATUS[0].store(SensorStatus::from(error) as u8, Ordering::Relaxed);
     LAST_LED_RED.store(led_red, Ordering::Relaxed);
     LAST_LED_GREEN.store(led_green, Ordering::Relaxed);

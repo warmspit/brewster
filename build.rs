@@ -187,6 +187,7 @@ fn inject_local_wifi_env() {
         "UDP_SERVER_IP",
         "UDP_SERVER_PORT",
         "DS18B20_RESOLUTION",
+        "SSR_HEAT_DEADBAND",
     ] {
         if let Some(value) = extract_env_value(&contents, key) {
             println!("cargo:rustc-env={key}={value}");

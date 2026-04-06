@@ -182,6 +182,21 @@ const updateFromStatus = (
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
   const hostnameEl = document.getElementById("device-hostname");
   if (hostnameEl) hostnameEl.textContent = data.hostname ?? "";
+  const stateEl = document.getElementById("device-state") as HTMLElement | null;
+  if (stateEl) {
+    const heating = data.pid.heat_on === true;
+    const cooling = data.pid.relay_on === true;
+    if (heating) {
+      stateEl.textContent = "Heating";
+      stateEl.style.cssText = "font-size:11px;font-weight:600;letter-spacing:0.06em;padding:2px 9px;border-radius:999px;color:#ffb347;border:1px solid rgba(255,179,71,0.45);background:rgba(255,179,71,0.1);";
+    } else if (cooling) {
+      stateEl.textContent = "Cooling";
+      stateEl.style.cssText = "font-size:11px;font-weight:600;letter-spacing:0.06em;padding:2px 9px;border-radius:999px;color:#40c4ff;border:1px solid rgba(64,196,255,0.45);background:rgba(64,196,255,0.1);";
+    } else {
+      stateEl.textContent = "Idle";
+      stateEl.style.cssText = "font-size:11px;font-weight:600;letter-spacing:0.06em;padding:2px 9px;border-radius:999px;color:var(--muted);border:1px solid transparent;background:none;";
+    }
+  }
   setText("updated", new Date().toLocaleTimeString());
   if (data.system && data.system.uptime_s !== null) {
     setText("uptime", formatUptime(data.system.uptime_s));

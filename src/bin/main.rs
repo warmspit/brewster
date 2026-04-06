@@ -141,7 +141,7 @@ async fn main(spawner: Spawner) -> ! {
 
     println!("{} booting", device_hostname());
     println!(
-        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr:GPIO12, led:GPIO48}}",
+        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr-cool:GPIO12, ssr-heat:GPIO13, led:GPIO48}}",
         status::get_target_temp_c(),
         status::temp_probe_name(),
         PID_KP,
@@ -165,6 +165,7 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     let mut relay = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
+    let mut heat_relay = Output::new(peripherals.GPIO13, Level::Low, OutputConfig::default());
 
     let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
     let led_config = TxChannelConfig::default()
@@ -217,6 +218,7 @@ async fn main(spawner: Spawner) -> ! {
             &mut delay,
             &mut one_wire_pin,
             &mut relay,
+            &mut heat_relay,
             &mut pid,
             &mut window_step,
         )

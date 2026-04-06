@@ -277,6 +277,7 @@ impl Store {
                 collecting: r.device_collecting,
                 ntp_synced: r.ntp_synced,
                 history_clear: false,
+                heat_on: false,
                 window_step: r.window_step,
                 on_steps: r.on_steps,
                 sensor_status: r.sensor_status,

@@ -19,6 +19,10 @@ NTP_SERVERS = "129.6.15.28,194.58.204.20"
 # Optional fallback when NTP_SERVERS is empty or invalid
 NTP_SERVER = "8.8.8.8"
 
+# Heat SSR deadband in °C (default 0.5). Heating turns on when temp drops
+# more than this amount below the target, and off once temp reaches target.
+# SSR_HEAT_DEADBAND = "0.5"
+
 # UDP telemetry server (optional).  Set UDP_SERVER_IP to enable.
 # brewster-server listens on port 47890 by default; run it on any LAN host.
 # The dashboard served by the server is then accessible on http://<server>:8080

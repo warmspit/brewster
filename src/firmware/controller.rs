@@ -56,11 +56,13 @@ pub fn compute_on_steps(pid_output: f32) -> u32 {
 fn on_sensor_error(
     pid: &mut Pid<f32>,
     relay: &mut Output<'static>,
+    heat_relay: &mut Output<'static>,
     window_step: &mut u32,
     error: SensorError,
 ) -> (Rgb8, bool) {
     pid.reset_integral_term();
     relay.set_low();
+    heat_relay.set_low();
     *window_step = 0;
     let color = sensor_fault_color(error);
     status::update_error(error, color.red, color.green, color.blue);
@@ -71,6 +73,7 @@ pub async fn control_step(
     delay: &mut Delay,
     one_wire_pin: &mut Flex<'static>,
     relay: &mut Output<'static>,
+    heat_relay: &mut Output<'static>,
     pid: &mut Pid<f32>,
     window_step: &mut u32,
 ) -> (Rgb8, bool) {
@@ -83,12 +86,14 @@ pub async fn control_step(
                     if !status::collection_enabled() {
                         pid.reset_integral_term();
                         relay.set_low();
+                        heat_relay.set_low();
                         *window_step = 0;
                         let color = status_color(false);
                         status::update_success(status::RuntimeSample {
                             temp_c,
                             pid_output: 0.0,
                             heating_on: false,
+                            heat_on: false,
                             led_red: color.red,
                             led_green: color.green,
                             led_blue: color.blue,
@@ -98,18 +103,33 @@ pub async fn control_step(
                         return (color, false);
                     }
 
-                    // Cooling mode: positive control output when temperature is above target.
-                    pid.setpoint = -status::get_target_temp_c();
+                    let target_c = status::get_target_temp_c();
+
+                    // ── Cooling (PID) ─────────────────────────────────────────
+                    // Positive output when temperature is above target.
+                    pid.setpoint = -target_c;
                     let pid_output = pid.next_control_output(-temp_c).output.clamp(0.0, 100.0);
                     let on_steps = compute_on_steps(pid_output);
                     let cooling_on = *window_step < on_steps;
-
                     relay.set_level(if cooling_on { Level::High } else { Level::Low });
+
+                    // ── Heating (bang-bang) ───────────────────────────────────
+                    // Turn on when temp drops below target by more than the deadband;
+                    // turn off once temp reaches the target.  Never heat and cool simultaneously.
+                    let deadband = config::ssr_heat_deadband_c();
+                    let heat_on = if cooling_on {
+                        false // never heat while cooling
+                    } else {
+                        temp_c < (target_c - deadband)
+                    };
+                    heat_relay.set_level(if heat_on { Level::High } else { Level::Low });
+
                     let color = status_color(cooling_on);
                     status::update_success(status::RuntimeSample {
                         temp_c,
                         pid_output,
                         heating_on: cooling_on,
+                        heat_on,
                         led_red: color.red,
                         led_green: color.green,
                         led_blue: color.blue,
@@ -119,9 +139,9 @@ pub async fn control_step(
                     *window_step = (*window_step + 1) % config::SSR_WINDOW_STEPS;
                     (color, cooling_on)
                 }
-                Err(error) => on_sensor_error(pid, relay, window_step, error),
+                Err(error) => on_sensor_error(pid, relay, heat_relay, window_step, error),
             }
         }
-        Err(error) => on_sensor_error(pid, relay, window_step, error),
+        Err(error) => on_sensor_error(pid, relay, heat_relay, window_step, error),
     }
 }
