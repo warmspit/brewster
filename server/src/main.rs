@@ -12,7 +12,7 @@
 //! | `HTTP_PORT`        | `8080`                   | Port the HTTP server binds to           |
 //! | `DEVICE_HTTP_PORT` | `80`                     | Port the device's embedded HTTP server  |
 //! | `DEVICE_NAME`      | `brewster`               | Display name and mDNS instance label    |
-//! | `RETENTION_HOURS`  | `72`                     | How many hours of data to keep          |
+//! | `RETENTION_HOURS`  | `1440`                   | How many hours of data to keep          |
 //! | `WEB_DIR`          | `../web`                 | Path to the dashboard static assets     |
 //! | `DATA_FILE`        | `./brewster-data.json`   | Path to the persistence file            |
 //! | `SENSOR_NAMES`     | *(empty)*                | Comma-separated probe names e.g. `Freezer,Thermal Well,Ambient` |
@@ -22,7 +22,7 @@
 //! ```sh
 //! cd server && cargo run --release
 //! # or with options:
-//! UDP_PORT=47890 HTTP_PORT=8080 RETENTION_HOURS=168 WEB_DIR=../web cargo run --release
+//! UDP_PORT=47890 HTTP_PORT=8080 RETENTION_HOURS=672 WEB_DIR=../web cargo run --release
 //! ```
 
 mod discovery;
