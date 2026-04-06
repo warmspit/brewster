@@ -9,6 +9,12 @@ PASSWORD = "your-password"
 DEVICE_HOSTNAME = "brewster"
 WIFI_SCAN_EVERY_ATTEMPTS = "6"
 STATUS_PRINT_EVERY_SECONDS = "5"
+# DS18B20 ADC resolution (9, 10, 11, or 12 bits). Default: 11.
+#   9-bit  →  94 ms conversion, 0.5 °C steps
+#   10-bit → 188 ms conversion, 0.25 °C steps
+#   11-bit → 375 ms conversion, 0.125 °C steps  ← default
+#   12-bit → 750 ms conversion, 0.0625 °C steps
+DS18B20_RESOLUTION = "11"
 NTP_SERVERS = "129.6.15.28,194.58.204.20"
 # Optional fallback when NTP_SERVERS is empty or invalid
 NTP_SERVER = "8.8.8.8"

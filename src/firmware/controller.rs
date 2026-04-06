@@ -76,7 +76,7 @@ pub async fn control_step(
 ) -> (Rgb8, bool) {
     match sensor::ds18b20_start_conversion(one_wire_pin, delay) {
         Ok(()) => {
-            Timer::after(Duration::from_millis(config::DS18B20_CONVERSION_MS)).await;
+            Timer::after(Duration::from_millis(config::ds18b20_conversion_ms())).await;
 
             match sensor::ds18b20_read_temperature_c(one_wire_pin, delay) {
                 Ok(temp_c) => {

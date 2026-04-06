@@ -10,6 +10,7 @@ use super::shared;
 
 const ONEWIRE_SKIP_ROM: u8 = 0xCC;
 const ONEWIRE_READ_SCRATCHPAD: u8 = 0xBE;
+const ONEWIRE_WRITE_SCRATCHPAD: u8 = 0x4E;
 const ONEWIRE_CONVERT_TEMP: u8 = 0x44;
 const DS18B20_READ_ATTEMPTS: usize = 3;
 
@@ -125,6 +126,33 @@ fn ds18b20_read_scratchpad(
         one_wire_write_byte(pin, delay, ONEWIRE_SKIP_ROM);
         one_wire_write_byte(pin, delay, ONEWIRE_READ_SCRATCHPAD);
         one_wire_read_bytes(pin, delay, scratchpad);
+        Ok(())
+    })
+}
+
+/// Write the DS18B20 configuration register to set the ADC resolution.
+///
+/// `resolution_bits` must be 9, 10, 11, or 12. Values outside that range are
+/// clamped. Call this once at start-up after the 1-Wire pin has been configured.
+/// The register is stored in non-volatile EEPROM on the sensor so it survives
+/// a power cycle, but writing it on every boot is cheap and keeps behaviour
+/// deterministic.
+pub fn ds18b20_configure_resolution(
+    pin: &mut Flex<'static>,
+    delay: &mut Delay,
+    resolution_bits: u8,
+) -> Result<(), SensorError> {
+    // Config register byte: bits[6:5] = R1:R0 selects resolution.
+    //   9-bit  → 0x1F, 10-bit → 0x3F, 11-bit → 0x5F, 12-bit → 0x7F
+    let r = resolution_bits.clamp(9, 12) - 9; // 0..=3
+    let config_byte: u8 = 0x1F | (r << 5);
+    critical_section::with(|_| {
+        one_wire_reset(pin, delay)?;
+        one_wire_write_byte(pin, delay, ONEWIRE_SKIP_ROM);
+        one_wire_write_byte(pin, delay, ONEWIRE_WRITE_SCRATCHPAD);
+        one_wire_write_byte(pin, delay, 0x00); // TH register (unused)
+        one_wire_write_byte(pin, delay, 0x00); // TL register (unused)
+        one_wire_write_byte(pin, delay, config_byte);
         Ok(())
     })
 }

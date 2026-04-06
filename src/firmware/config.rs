@@ -2,8 +2,38 @@
 // Copyright (c) 2026 David Bannister
 
 pub const CONTROL_PERIOD_MS: u64 = 1_000;
-pub const DS18B20_CONVERSION_MS: u64 = 750;
 pub const STATUS_PRINT_EVERY_SECONDS_DEFAULT: u64 = 5;
+
+/// DS18B20 probe resolution in bits (9, 10, 11, or 12).
+/// Configured via `DS18B20_RESOLUTION` in `config.local.toml`.
+/// Default is 11-bit (0.125 °C resolution, 375 ms conversion time).
+const DS18B20_RESOLUTION_DEFAULT: u8 = 11;
+pub const DS18B20_RESOLUTION_CONFIG: Option<&str> = option_env!("DS18B20_RESOLUTION");
+
+/// Return the configured probe resolution, clamped to the valid range [9, 12].
+pub fn ds18b20_resolution_bits() -> u8 {
+    DS18B20_RESOLUTION_CONFIG
+        .and_then(|v| v.parse::<u8>().ok())
+        .map(|v| v.clamp(9, 12))
+        .unwrap_or(DS18B20_RESOLUTION_DEFAULT)
+}
+
+/// Conversion wait time in milliseconds for the configured resolution.
+///
+/// | Resolution | Conversion time |
+/// |------------|-----------------|
+/// | 9-bit      |  93.75 ms       |
+/// | 10-bit     | 187.5  ms       |
+/// | 11-bit     | 375    ms       |
+/// | 12-bit     | 750    ms       |
+pub fn ds18b20_conversion_ms() -> u64 {
+    match ds18b20_resolution_bits() {
+        9 => 94,   // ceiling of 93.75 ms
+        10 => 188, // ceiling of 187.5 ms
+        11 => 375,
+        _ => 750, // 12-bit (default max)
+    }
+}
 pub const SSR_WINDOW_STEPS: u32 = 10;
 pub const BOOT_OK_DISPLAY_MS: u64 = 2_000;
 pub const STATUS_PRINT_EVERY_SECONDS: Option<&str> = option_env!("STATUS_PRINT_EVERY_SECONDS");
