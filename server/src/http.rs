@@ -98,6 +98,12 @@ struct PidJson {
     window_step: u8,
     on_steps: u8,
     relay_on: bool,
+    heat_on: bool,
+    deadband_c: f32,
+    /// Active PID term contributions (%).
+    pid_p_pct: f32,
+    pid_i_pct: f32,
+    pid_d_pct: f32,
 }
 
 #[derive(Serialize)]
@@ -177,6 +183,11 @@ async fn get_status(
             window_step: pkt.window_step,
             on_steps: pkt.on_steps,
             relay_on: pkt.relay_on,
+            heat_on: pkt.heat_on,
+            deadband_c: pkt.deadband_c,
+            pid_p_pct: pkt.pid_p_pct as f32,
+            pid_i_pct: pkt.pid_i_pct as f32,
+            pid_d_pct: pkt.pid_d_pct as f32,
         },
         system: SystemJson {
             ip,
@@ -207,7 +218,8 @@ struct HistoryQuery {
 struct HistoryJson {
     sample_interval_s: u32,
     total_samples: u32,
-    // Each point: [seq, temp_c, target_c, output_pct, window_step, on_steps, relay_on, extra1, extra2]
+    // Each point: [seq, temp_c, target_c, output_pct, window_step, on_steps, relay_on,
+    //              extra1, extra2, pid_p_pct, pid_i_pct, pid_d_pct, t_s, gap_before]
     points: Vec<serde_json::Value>,
 }
 
@@ -234,6 +246,7 @@ async fn get_history(
                 Some(v) => serde_json::Value::from((v * 100.0).round() / 100.0),
                 None => serde_json::Value::Null,
             };
+            let gap: i32 = if p.gap_before { 1 } else { 0 };
             serde_json::json!([
                 p.seq,
                 temp,
@@ -244,6 +257,11 @@ async fn get_history(
                 relay,
                 e1,
                 e2,
+                p.pid_p_pct,
+                p.pid_i_pct,
+                p.pid_d_pct,
+                p.t_s, // col 12: wall-clock unix seconds
+                gap,   // col 13: 1 if real data gap precedes this point
             ])
         })
         .collect();

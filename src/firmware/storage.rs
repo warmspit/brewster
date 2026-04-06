@@ -60,11 +60,18 @@ pub struct RuntimeSample {
     pub temp_c: f32,
     pub pid_output: f32,
     pub heating_on: bool,
+    pub heat_on: bool,
     pub led_red: u8,
     pub led_green: u8,
     pub led_blue: u8,
     pub pid_window_step: u8,
     pub pid_on_steps: u8,
+    /// Active PID proportional term contribution (%).
+    pub pid_p_pct: f32,
+    /// Active PID integral term contribution (%).
+    pub pid_i_pct: f32,
+    /// Active PID derivative term contribution (%).
+    pub pid_d_pct: f32,
 }
 
 #[derive(Clone, Copy, Debug)]

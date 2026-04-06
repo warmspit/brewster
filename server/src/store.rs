@@ -111,6 +111,9 @@ impl Store {
                     sensor_status: pkt.sensor_status,
                     device_ip: pkt.device_ip,
                     sensor_count: pkt.sensor_count,
+                    pid_p_pct: pkt.pid_p_pct,
+                    pid_i_pct: pkt.pid_i_pct,
+                    pid_d_pct: pkt.pid_d_pct,
                 };
                 g.records.push_back(Record {
                     received_at: now,
@@ -146,32 +149,34 @@ impl Store {
     }
 
     /// Return history points, total sample count, and derived sample interval in a single read-lock acquisition.
-    /// Adaptively downsamples so the response always spans the full history but never exceeds `max_points`.
+    /// Downsamples using LTTB (Largest Triangle Three Buckets) so the response always spans the full
+    /// history but never exceeds `max_points`, while preserving visually salient peaks and troughs.
+    /// Each point carries `gap_before` — set by inspecting raw source record timestamps so real data
+    /// gaps (server offline, device reboot) are reported accurately regardless of downsampling ratio.
     /// `sample_interval_s` is derived from the median uptime gap between consecutive returned records.
     pub fn history_data(&self, max_points: usize) -> (Vec<HistoryPoint>, u32, u32) {
         let g = self.0.read().unwrap();
         let n = g.records.len();
         let total = n as u32;
 
-        // Uniformly spread max_points indices across [0, n) so all retained history is visible.
-        let sampled: Vec<&Record> = if n <= max_points {
-            g.records.iter().collect()
+        // LTTB: select source indices that best represent the data visually.
+        // Always includes the first and last records; intermediate points are chosen per bucket to
+        // maximise the triangle area formed with the previously-selected point and the average of
+        // the next bucket.  Falls back to identity when n <= max_points.
+        let source: Vec<&Record> = g.records.iter().collect();
+        let indices: Vec<usize> = if n <= max_points {
+            (0..n).collect()
         } else {
-            (0..max_points)
-                .map(|i| {
-                    let idx = (i as u64 * n as u64 / max_points as u64) as usize;
-                    &g.records[idx]
-                })
-                .collect()
+            lttb_indices(&source, max_points)
         };
 
         // Derive sample interval from the median uptime gap between consecutive returned records.
-        let interval_s: u32 = if sampled.len() >= 2 {
-            let mut gaps: Vec<u32> = sampled
+        let interval_s: u32 = if indices.len() >= 2 {
+            let mut gaps: Vec<u32> = indices
                 .windows(2)
                 .filter_map(|w| {
-                    let a = w[0].packet.uptime_s;
-                    let b = w[1].packet.uptime_s;
+                    let a = source[w[0]].packet.uptime_s;
+                    let b = source[w[1]].packet.uptime_s;
                     b.checked_sub(a).filter(|&d| d > 0 && d < 86400)
                 })
                 .collect();
@@ -185,20 +190,54 @@ impl Store {
             1
         };
 
-        let points = sampled
+        // A "real gap" in the source data: any consecutive pair of raw records whose wall-clock
+        // receive-time difference materially exceeds their uptime delta (records arrive ~1 s apart).
+        let gap_threshold = std::time::Duration::from_secs(5);
+
+        let points = indices
             .iter()
-            .map(|r| HistoryPoint {
-                seq: r.packet.seq,
-                temp_c: nan_to_null(r.packet.temps[0]),
-                target_c: r.packet.target_c,
-                output_pct: r.packet.output_pct,
-                window_step: r.packet.window_step,
-                on_steps: r.packet.on_steps,
-                relay_on: r.packet.relay_on,
-                extra_temps: [
-                    nan_to_null(r.packet.temps[1]),
-                    nan_to_null(r.packet.temps[2]),
-                ],
+            .enumerate()
+            .map(|(out_idx, &src_idx)| {
+                let r = source[src_idx];
+                let t_s = r
+                    .received_at
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                // Scan the source records *consumed* by this output point for real time gaps.
+                let gap_before = if out_idx == 0 {
+                    false
+                } else {
+                    let prev_src = indices[out_idx - 1];
+                    // Any pair of consecutive raw records between prev_src and src_idx with a gap.
+                    (prev_src..src_idx).any(|k| {
+                        source[k + 1]
+                            .received_at
+                            .duration_since(source[k].received_at)
+                            .unwrap_or_default()
+                            > gap_threshold
+                    })
+                };
+
+                HistoryPoint {
+                    seq: r.packet.seq,
+                    t_s,
+                    gap_before,
+                    temp_c: nan_to_null(r.packet.temps[0]),
+                    target_c: r.packet.target_c,
+                    output_pct: r.packet.output_pct,
+                    window_step: r.packet.window_step,
+                    on_steps: r.packet.on_steps,
+                    relay_on: r.packet.relay_on,
+                    extra_temps: [
+                        nan_to_null(r.packet.temps[1]),
+                        nan_to_null(r.packet.temps[2]),
+                    ],
+                    pid_p_pct: r.packet.pid_p_pct,
+                    pid_i_pct: r.packet.pid_i_pct,
+                    pid_d_pct: r.packet.pid_d_pct,
+                }
             })
             .collect();
         (points, total, interval_s)
@@ -242,6 +281,9 @@ impl Store {
                     sensor_status: p.sensor_status,
                     device_ip: p.device_ip,
                     sensor_count: p.sensor_count,
+                    pid_p_pct: p.pid_p_pct,
+                    pid_i_pct: p.pid_i_pct,
+                    pid_d_pct: p.pid_d_pct,
                 }
             })
             .collect()
@@ -277,11 +319,16 @@ impl Store {
                 collecting: r.device_collecting,
                 ntp_synced: r.ntp_synced,
                 history_clear: false,
+                heat_on: false,
                 window_step: r.window_step,
                 on_steps: r.on_steps,
                 sensor_status: r.sensor_status,
                 device_ip: r.device_ip,
                 sensor_count: r.sensor_count,
+                deadband_c: 0.5,
+                pid_p_pct: r.pid_p_pct,
+                pid_i_pct: r.pid_i_pct,
+                pid_d_pct: r.pid_d_pct,
             };
             g.records.push_back(Record {
                 received_at,
@@ -348,13 +395,26 @@ pub struct PersistedRecord {
     pub sensor_status: [u8; 3],
     pub device_ip: [u8; 4],
     pub sensor_count: u8,
+    /// Active PID term contributions (%), 0 for historical records that pre-date v5.
+    #[serde(default)]
+    pub pid_p_pct: i8,
+    #[serde(default)]
+    pub pid_i_pct: i8,
+    #[serde(default)]
+    pub pid_d_pct: i8,
 }
 
 /// Matches the dashboard's expected history point array:
-/// `[seq, temp_c, target_c, output_pct, window_step, on_steps, relay_on, extra1, extra2]`
+/// `[seq, temp_c, target_c, output_pct, window_step, on_steps, relay_on, extra1, extra2, pid_p_pct, pid_i_pct, pid_d_pct, t_s, gap_before]`
 #[derive(Serialize)]
 pub struct HistoryPoint {
     pub seq: u32,
+    /// Wall-clock Unix timestamp (seconds) when this record was received by the server.
+    pub t_s: u64,
+    /// True if there is a real data gap in the source records immediately before this point
+    /// (e.g. server was offline or device rebooted).  Set by inspecting raw record timestamps
+    /// so it is accurate regardless of the downsampling ratio.
+    pub gap_before: bool,
     pub temp_c: Option<f32>,
     pub target_c: f32,
     pub output_pct: u8,
@@ -362,4 +422,75 @@ pub struct HistoryPoint {
     pub on_steps: u8,
     pub relay_on: bool,
     pub extra_temps: [Option<f32>; 2],
+    pub pid_p_pct: i8,
+    pub pid_i_pct: i8,
+    pub pid_d_pct: i8,
+}
+
+// ── LTTB downsampling ─────────────────────────────────────────────────────────
+
+/// Largest-Triangle-Three-Buckets downsampling.
+///
+/// Returns the selected source indices (always includes index 0 and n-1).
+/// Uses `uptime_s` as the x-axis and `temps[0]` (primary probe) as the y-axis.
+/// NaN temperatures are treated as 0.0 for the area calculation only.
+fn lttb_indices(records: &[&Record], threshold: usize) -> Vec<usize> {
+    let n = records.len();
+    if n <= threshold {
+        return (0..n).collect();
+    }
+
+    let temp = |i: usize| -> f64 {
+        let t = records[i].packet.temps[0];
+        if t.is_nan() { 0.0 } else { t as f64 }
+    };
+    let time = |i: usize| -> f64 { records[i].packet.uptime_s as f64 };
+
+    let mut selected: Vec<usize> = Vec::with_capacity(threshold);
+    selected.push(0);
+
+    let nbuckets = threshold - 2; // intermediate buckets
+    let mut a = 0usize; // source index of previously selected point
+
+    for i in 0..nbuckets {
+        // Current bucket: integer-arithmetic bucket boundaries to avoid float drift.
+        let curr_start = i * (n - 2) / nbuckets + 1;
+        let curr_end = (i + 1) * (n - 2) / nbuckets + 1;
+
+        // Next bucket (look-ahead for the average point C).
+        let next_start = curr_end;
+        let next_end = if i + 1 < nbuckets {
+            (i + 2) * (n - 2) / nbuckets + 1
+        } else {
+            n - 1 // last point is always included separately
+        };
+
+        // Average of next bucket (point C).
+        let next_len = (next_end - next_start).max(1) as f64;
+        let avg_x: f64 = (next_start..next_end).map(time).sum::<f64>() / next_len;
+        let avg_y: f64 = (next_start..next_end).map(temp).sum::<f64>() / next_len;
+
+        // Point A: previously selected.
+        let ax = time(a);
+        let ay = temp(a);
+
+        // Find point B in current bucket with the largest triangle area (A, B, C).
+        let mut max_area = -1.0f64;
+        let mut max_j = curr_start;
+        for j in curr_start..curr_end {
+            let bx = time(j);
+            let by = temp(j);
+            // Twice the triangle area = |det| — we skip the ×0.5 since we only compare.
+            let area = ((ax - avg_x) * (by - ay) - (ax - bx) * (avg_y - ay)).abs();
+            if area > max_area {
+                max_area = area;
+                max_j = j;
+            }
+        }
+        selected.push(max_j);
+        a = max_j;
+    }
+
+    selected.push(n - 1);
+    selected
 }

@@ -15,6 +15,7 @@
 //! - Any packet whose hostname does **not** match the current hostname is
 //!   **silently dropped** — this prevents stray devices from polluting the store.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
@@ -40,6 +41,7 @@ fn hostname_display(bytes: &[u8; 20]) -> &str {
 /// Appends each stored record immediately to `data_path`.
 pub async fn run(sock: UdpSocket, store: Store, notify: broadcast::Sender<()>, data_path: PathBuf) {
     let mut buf = [0u8; 64];
+    let mut last_bad: Option<(SocketAddr, usize, Option<u8>)> = None;
     loop {
         let (len, peer) = match sock.recv_from(&mut buf).await {
             Ok(v) => v,
@@ -51,10 +53,26 @@ pub async fn run(sock: UdpSocket, store: Store, notify: broadcast::Sender<()>, d
         let pkt = match packet::Packet::decode(&buf[..len]) {
             Some(p) => p,
             None => {
-                warn!("udp: bad packet from {peer} ({len} bytes)");
+                let version: Option<u8> = if len > 4 && &buf[0..4] == packet::PACKET_MAGIC {
+                    Some(buf[4])
+                } else {
+                    None
+                };
+                let key = (peer, len, version);
+                if last_bad.as_ref() != Some(&key) {
+                    match version {
+                        Some(v) => warn!(
+                            "udp: bad packet from {peer} ({len} bytes version={v} want={})",
+                            packet::PACKET_VERSION
+                        ),
+                        None => warn!("udp: bad packet from {peer} ({len} bytes)"),
+                    }
+                    last_bad = Some(key);
+                }
                 continue;
             }
         };
+        last_bad = None;
 
         // --- hostname check ---
         let current = *CURRENT_HOSTNAME.read().unwrap();

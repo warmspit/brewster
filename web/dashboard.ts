@@ -14,9 +14,8 @@ let uptimeAtHistoryLoad: number | null = null;
 // Set to true after each loadHistoryFromDevice so the first merged point gets a
 // session-boundary gap marker, clearly separating persisted history from live data.
 let sessionGapPending = false;
-// Last valid kp/ki/kd seen (from history or live status). Used to fill gaps
-// when the server status doesn't carry PID gains (UDP packet has no kp/ki/kd).
-let lastKnownPidGains = { kp: 0, ki: 0, kd: 0 };
+const LIVE_WINDOW_SECONDS = 3600;
+let liveFollow = true;
 
 const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChart: PidChart): Promise<void> => {
   const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
@@ -30,38 +29,41 @@ const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChar
   const pidValues: PidSample[] = [];
   // Keyed by sensor index (1-based); extra sensor temps from history columns 7+
   const extraTempValues: Map<number, number[]> = new Map();
-  // Indices where a seq gap indicates missed server coverage or device reboot.
+  // Indices where the server has flagged a real data gap (col 13 = gap_before).
+  // Use server-annotated gap_before rather than seq-based heuristics so the detection
+  // is accurate regardless of downsampling algorithm or ratio.
   const gapIndices: number[] = [];
-  let prevSeq: number | null = null;
+
+  const sampleIntervalS =
+    Number.isFinite(Number(payload.sample_interval_s)) && Number(payload.sample_interval_s) > 0
+      ? Number(payload.sample_interval_s)
+      : TREND_SAMPLE_INTERVAL_SECONDS;
 
   points.forEach((point) => {
     if (!Array.isArray(point) || point.length < 7) {
       return;
     }
-    const seq = Number(point[0]);
     const idx = tempValues.length;
-    // Flag if seq went backwards (reboot) or jumped more than 1.5× the expected interval.
-    if (prevSeq !== null) {
-      const seqDiff = seq - prevSeq;
-      if (seqDiff < 0 || seqDiff > 1.5 * (payload.sample_interval_s ?? 60)) {
-        gapIndices.push(idx);
+    // col 13: gap_before flag set by the server based on raw record timestamps.
+    if (Number(point[13]) === 1) {
+      gapIndices.push(idx);
       }
     }
-    prevSeq = seq;
     tempValues.push(Number(point[1]));
     targetValues.push(Number(point[2]));
     pidValues.push({
       target_c: Number(point[2]),
-      kp: 14.0,
-      ki: 0.35,
-      kd: 6.0,
+      pid_p_pct: Number(point[9]) || 0,
+      pid_i_pct: Number(point[10]) || 0,
+      pid_d_pct: Number(point[11]) || 0,
       output_percent: Number(point[3]),
       window_step: Number(point[4]),
       on_steps: Number(point[5]),
       relay_on: Number(point[6]),
     });
-    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2, etc.
-    for (let col = 7; col < point.length; col++) {
+    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2.
+    // Columns 9–11 are pid_p/i/d — stop before them.
+    for (let col = 7; col < Math.min(point.length, 9); col++) {
       const sensorIdx = col - 6;
       if (!extraTempValues.has(sensorIdx)) extraTempValues.set(sensorIdx, []);
       const raw = point[col];
@@ -70,10 +72,6 @@ const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChar
     lastHistorySeq = Number(point[0]);
   });
 
-  const sampleIntervalS =
-    Number.isFinite(Number(payload.sample_interval_s)) && Number(payload.sample_interval_s) > 0
-      ? Number(payload.sample_interval_s)
-      : TREND_SAMPLE_INTERVAL_SECONDS;
   loadedHistoryBaseSeconds = Math.max(0, tempValues.length - 1) * sampleIntervalS;
   uptimeAtHistoryLoad = null; // reset; will be captured on next updateFromStatus call
   sessionGapPending = true;  // next merge point starts a new visual segment
@@ -96,11 +94,6 @@ const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChar
   }
   pidChart.setValues(pidValues);
   pidChart.setElapsedSeconds(loadedHistoryBaseSeconds);
-  // Capture last kp/ki/kd from history so live pushes stay on the same scale.
-  if (pidValues.length > 0) {
-    const last = pidValues[pidValues.length - 1];
-    if (Number.isFinite(last.kp)) lastKnownPidGains = { kp: last.kp, ki: last.ki, kd: last.kd };
-  }
 };
 
 const mergeHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChart: PidChart): Promise<void> => {
@@ -125,8 +118,9 @@ const mergeHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidCha
     lastHistorySeq = seq;
     primarySparkline.push(Number(point[1]));
     primarySparkline.pushTarget(Number(point[2]));
-    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2, etc.
-    for (let col = 7; col < point.length; col++) {
+    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2.
+    // Columns 9–11 are pid_p/i/d — stop before them.
+    for (let col = 7; col < Math.min(point.length, 9); col++) {
       const sensorIdx = col - 6;
       const sl = sparklines.get(sensorIdx);
       if (sl) {
@@ -137,9 +131,9 @@ const mergeHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidCha
     }
     pidChart.push({
       target_c: Number(point[2]),
-      kp: 14.0,
-      ki: 0.35,
-      kd: 6.0,
+      pid_p_pct: Number(point[9]) || 0,
+      pid_i_pct: Number(point[10]) || 0,
+      pid_d_pct: Number(point[11]) || 0,
       output_percent: Number(point[3]),
       window_step: Number(point[4]),
       on_steps: Number(point[5]),
@@ -228,28 +222,59 @@ const updateFromStatus = (
     targetInput.value = data.pid.target_c.toFixed(1);
   }
 
-  setText("pid", collecting ? `${data.pid.output_percent.toFixed(1)}%` : "0.0%");
-  const relayState = !collecting ? "Deactivated" : (data.pid.relay_on ? "On" : "Off");
+  const isHeating = collecting && data.pid.heat_on === true;
+  const isCooling = collecting && data.pid.relay_on === true;
+  const pidPct = collecting ? `${data.pid.output_percent.toFixed(1)}%` : "0.0%";
+  byId<HTMLElement>("pid").textContent = pidPct;
+  byId<HTMLElement>("pid").style.color = "";
+  const modeEl = document.getElementById("pid-mode");
+  if (modeEl) {
+    modeEl.textContent = isHeating ? "Heating" : isCooling ? "Cooling" : collecting ? "Idle" : "--";
+    (modeEl as HTMLElement).style.color = isHeating ? "#ffb347" : isCooling ? "#40c4ff" : "";
+  }
+  const relayOn = isHeating || isCooling;
+  const relayState = !collecting ? "Deactivated" : (relayOn ? "On" : "Off");
   setText("relay", relayState);
   byId<HTMLElement>("relay").style.color = relayState === "Deactivated" ? "#ff6e6e" : "";
+  const relayModeEl = document.getElementById("relay-mode");
+  if (relayModeEl) {
+    if (!collecting) {
+      relayModeEl.textContent = "--";
+      (relayModeEl as HTMLElement).style.color = "";
+    } else if (isHeating) {
+      relayModeEl.textContent = "Heat";
+      (relayModeEl as HTMLElement).style.color = "#ffb347";
+    } else if (isCooling) {
+      relayModeEl.textContent = "Cool";
+      (relayModeEl as HTMLElement).style.color = "#40c4ff";
+    } else {
+      relayModeEl.textContent = "Idle";
+      (relayModeEl as HTMLElement).style.color = "";
+    }
+  }
 
   if (collecting) {
-    if (Number.isFinite(data.pid.kp)) {
-      lastKnownPidGains = { kp: data.pid.kp, ki: data.pid.ki, kd: data.pid.kd };
-    }
     const sample: PidSample = {
       target_c: data.pid.target_c,
-      kp: lastKnownPidGains.kp,
-      ki: lastKnownPidGains.ki,
-      kd: lastKnownPidGains.kd,
+      pid_p_pct: data.pid.pid_p_pct ?? 0,
+      pid_i_pct: data.pid.pid_i_pct ?? 0,
+      pid_d_pct: data.pid.pid_d_pct ?? 0,
       output_percent: data.pid.output_percent,
       window_step: data.pid.window_step,
       on_steps: data.pid.on_steps,
       relay_on: data.pid.relay_on ? 1 : 0,
+      heat_on: data.pid.heat_on ? 1 : 0,
     };
     pidCharts.forEach((pidChart) => {
       pidChart.push(sample);
     });
+    if (collecting && liveFollow) {
+      const totalElapsed = loadedHistoryBaseSeconds +
+        (uptimeAtHistoryLoad !== null ? Math.max(0, data.system.uptime_s - uptimeAtHistoryLoad) : 0);
+      if (totalElapsed > LIVE_WINDOW_SECONDS) {
+        setZoomWindow(Math.max(0, 1 - LIVE_WINDOW_SECONDS / totalElapsed), 1);
+      }
+    }
   }
 
   setText("ip", data.system.ip || "--");
@@ -462,6 +487,7 @@ const start = (): void => {
   section.addEventListener("mouseleave", () => { lastHoverRatio = null; broadcastHoverRatio(null); });
 
   const applyZoom = (pivotRatio: number, factor: number): void => {
+    liveFollow = false;
     const span = zoomEnd - zoomStart;
     const newSpan = Math.max(0.02, Math.min(1, span * factor));
     const center = zoomStart + pivotRatio * span;
@@ -474,6 +500,7 @@ const start = (): void => {
   };
 
   const applyPan = (delta: number): void => {
+    liveFollow = false;
     const span = zoomEnd - zoomStart;
     const newStart = Math.max(0, Math.min(1 - span, zoomStart + delta * span));
     setZoomWindow(newStart, newStart + span);
@@ -492,7 +519,15 @@ const start = (): void => {
   };
 
   const resetZoom = (): void => {
-    setZoomWindow(0, 1);
+    liveFollow = true;
+    const elapsed = loadedHistoryBaseSeconds +
+      (uptimeAtHistoryLoad !== null && lastUptimeSeconds !== null
+        ? Math.max(0, lastUptimeSeconds - uptimeAtHistoryLoad) : 0);
+    if (elapsed > LIVE_WINDOW_SECONDS) {
+      setZoomWindow(Math.max(0, 1 - LIVE_WINDOW_SECONDS / elapsed), 1);
+    } else {
+      setZoomWindow(0, 1);
+    }
     sparklines.forEach((sparkline) => sparkline.redraw());
     pidCharts.forEach((chart) => chart.redraw());
   };

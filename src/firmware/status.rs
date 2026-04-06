@@ -3,6 +3,7 @@
 
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, Ordering};
+
 use critical_section::Mutex;
 
 use super::error::SensorError;
@@ -125,6 +126,7 @@ static LAST_TEMP_CENTI: [AtomicI32; MAX_SENSORS] = [
 ];
 static LAST_PID_OUTPUT_DECI_PERCENT: AtomicU16 = AtomicU16::new(0);
 static LAST_RELAY_ON: AtomicBool = AtomicBool::new(false);
+static LAST_HEAT_ON: AtomicBool = AtomicBool::new(false);
 static LAST_SENSOR_STATUS: [AtomicU8; MAX_SENSORS] = [
     AtomicU8::new(SensorStatus::NoDevice as u8),
     AtomicU8::new(SensorStatus::NoDevice as u8),
@@ -139,6 +141,10 @@ static HTTP_LED_ACTIVE_UNTIL_TICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(0));
 static UDP_SEND_ACTIVE_UNTIL_TICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(0));
 static LAST_PID_WINDOW_STEP: AtomicU8 = AtomicU8::new(0);
 static LAST_PID_ON_STEPS: AtomicU8 = AtomicU8::new(0);
+// PID term contributions encoded as i8-in-u8 (two's complement, %). Zero = not active.
+static LAST_PID_P: AtomicU8 = AtomicU8::new(0);
+static LAST_PID_I: AtomicU8 = AtomicU8::new(0);
+static LAST_PID_D: AtomicU8 = AtomicU8::new(0);
 static COLLECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 // Device IP packed as big-endian u32; use .to_be_bytes() to recover [u8; 4].
 static LAST_IP: AtomicU32 = AtomicU32::new(0);
@@ -222,6 +228,7 @@ pub struct MetricsSnapshot {
     pub temp_centi: i32,
     pub pid_deci: u16,
     pub relay_on: bool,
+    pub heat_on: bool,
     pub collection_enabled: bool,
     pub sensor_status_code: u8,
     pub led_red: u8,
@@ -229,6 +236,10 @@ pub struct MetricsSnapshot {
     pub led_blue: u8,
     pub pid_window_step: u8,
     pub pid_on_steps: u8,
+    /// Active PID P/I/D term contributions (%), encoded as i8.
+    pub pid_p_pct: i8,
+    pub pid_i_pct: i8,
+    pub pid_d_pct: i8,
     pub target_c: f32,
     pub target_f: f32,
     pub ip_valid: bool,
@@ -334,6 +345,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
     let temp_centi = primary_temp_centi();
     let pid_deci = LAST_PID_OUTPUT_DECI_PERCENT.load(Ordering::Relaxed);
     let relay_on = LAST_RELAY_ON.load(Ordering::Relaxed);
+    let heat_on = LAST_HEAT_ON.load(Ordering::Relaxed);
     let collection_enabled = COLLECTION_ENABLED.load(Ordering::Relaxed);
     let sensor_status_code = primary_sensor_status();
     let led_red = LAST_LED_RED.load(Ordering::Relaxed);
@@ -341,6 +353,9 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
     let led_blue = LAST_LED_BLUE.load(Ordering::Relaxed);
     let pid_window_step = LAST_PID_WINDOW_STEP.load(Ordering::Relaxed);
     let pid_on_steps = LAST_PID_ON_STEPS.load(Ordering::Relaxed);
+    let pid_p_pct = LAST_PID_P.load(Ordering::Relaxed) as i8;
+    let pid_i_pct = LAST_PID_I.load(Ordering::Relaxed) as i8;
+    let pid_d_pct = LAST_PID_D.load(Ordering::Relaxed) as i8;
 
     let target_c = super::storage::get_target_temp_c();
     let target_f = target_c * 9.0 / 5.0 + 32.0;
@@ -362,6 +377,7 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
         temp_centi,
         pid_deci,
         relay_on,
+        heat_on,
         collection_enabled,
         sensor_status_code,
         led_red,
@@ -369,6 +385,9 @@ pub fn metrics_snapshot() -> MetricsSnapshot {
         led_blue,
         pid_window_step,
         pid_on_steps,
+        pid_p_pct,
+        pid_i_pct,
+        pid_d_pct,
         target_c,
         target_f,
         ip_valid,
@@ -435,12 +454,16 @@ pub fn update_success(sample: RuntimeSample) {
     LAST_TEMP_CENTI[0].store((sample.temp_c * 100.0) as i32, Ordering::Relaxed);
     LAST_PID_OUTPUT_DECI_PERCENT.store((sample.pid_output * 10.0) as u16, Ordering::Relaxed);
     LAST_RELAY_ON.store(sample.heating_on, Ordering::Relaxed);
+    LAST_HEAT_ON.store(sample.heat_on, Ordering::Relaxed);
     LAST_SENSOR_STATUS[0].store(SensorStatus::None as u8, Ordering::Relaxed);
     LAST_LED_RED.store(sample.led_red, Ordering::Relaxed);
     LAST_LED_GREEN.store(sample.led_green, Ordering::Relaxed);
     LAST_LED_BLUE.store(sample.led_blue, Ordering::Relaxed);
     LAST_PID_WINDOW_STEP.store(sample.pid_window_step, Ordering::Relaxed);
     LAST_PID_ON_STEPS.store(sample.pid_on_steps, Ordering::Relaxed);
+    LAST_PID_P.store(sample.pid_p_pct.clamp(-127.0, 127.0) as i8 as u8, Ordering::Relaxed);
+    LAST_PID_I.store(sample.pid_i_pct.clamp(-127.0, 127.0) as i8 as u8, Ordering::Relaxed);
+    LAST_PID_D.store(sample.pid_d_pct.clamp(-127.0, 127.0) as i8 as u8, Ordering::Relaxed);
     if collection_enabled() {
         // Map UNKNOWN_TEMPERATURE_CENTI (i32::MIN) to i32::MAX so that missing
         // sensor readings are stored as the NaN sentinel rather than as
@@ -465,12 +488,16 @@ pub fn update_error(error: SensorError, led_red: u8, led_green: u8, led_blue: u8
     LAST_TEMP_CENTI[0].store(UNKNOWN_TEMPERATURE_CENTI, Ordering::Relaxed);
     LAST_PID_OUTPUT_DECI_PERCENT.store(0, Ordering::Relaxed);
     LAST_RELAY_ON.store(false, Ordering::Relaxed);
+    LAST_HEAT_ON.store(false, Ordering::Relaxed);
     LAST_SENSOR_STATUS[0].store(SensorStatus::from(error) as u8, Ordering::Relaxed);
     LAST_LED_RED.store(led_red, Ordering::Relaxed);
     LAST_LED_GREEN.store(led_green, Ordering::Relaxed);
     LAST_LED_BLUE.store(led_blue, Ordering::Relaxed);
     LAST_PID_WINDOW_STEP.store(0, Ordering::Relaxed);
     LAST_PID_ON_STEPS.store(0, Ordering::Relaxed);
+    LAST_PID_P.store(0, Ordering::Relaxed);
+    LAST_PID_I.store(0, Ordering::Relaxed);
+    LAST_PID_D.store(0, Ordering::Relaxed);
 }
 
 /// Update a specific sensor's reading (for auxiliary sensors)

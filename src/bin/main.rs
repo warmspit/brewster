@@ -12,6 +12,8 @@
 
 extern crate alloc;
 
+include!(concat!(env!("OUT_DIR"), "/ssr_config.rs"));
+
 #[path = "../firmware/mod.rs"]
 mod firmware;
 
@@ -141,12 +143,14 @@ async fn main(spawner: Spawner) -> ! {
 
     println!("{} booting", device_hostname());
     println!(
-        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr:GPIO12, led:GPIO48}}",
+        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr-cool:GPIO{}, ssr-heat:GPIO{}, led:GPIO48}}",
         status::get_target_temp_c(),
         status::temp_probe_name(),
         PID_KP,
         PID_KI,
         PID_KD,
+        SSR_COOL_PIN_NUM,
+        SSR_HEAT_PIN_NUM,
     );
 
     let one_wire_pin = sensor::configure_one_wire_pin(Flex::new(peripherals.GPIO5));
@@ -161,10 +165,22 @@ async fn main(spawner: Spawner) -> ! {
             config::ds18b20_resolution_bits(),
             config::ds18b20_conversion_ms()
         ),
-        Err(e) => println!("ds18b20: resolution config failed: {:?} — using hardware default", e),
+        Err(e) => println!(
+            "ds18b20: resolution config failed: {:?} — using hardware default",
+            e
+        ),
     }
 
-    let mut relay = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
+    let mut relay = Output::new(
+        ssr_cool_gpio!(peripherals),
+        Level::Low,
+        OutputConfig::default(),
+    );
+    let mut heat_relay = Output::new(
+        ssr_heat_gpio!(peripherals),
+        Level::Low,
+        OutputConfig::default(),
+    );
 
     let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
     let led_config = TxChannelConfig::default()
@@ -184,7 +200,18 @@ async fn main(spawner: Spawner) -> ! {
         .i(PID_KI, config::PID_OUTPUT_LIMIT_PERCENT)
         .d(PID_KD, config::PID_OUTPUT_LIMIT_PERCENT);
 
+    let mut heat_pid = Pid::new(
+        status::get_target_temp_c(),
+        config::PID_OUTPUT_LIMIT_PERCENT,
+    );
+    heat_pid
+        .p(PID_KP, config::PID_OUTPUT_LIMIT_PERCENT)
+        .i(PID_KI, config::PID_OUTPUT_LIMIT_PERCENT)
+        .d(PID_KD, config::PID_OUTPUT_LIMIT_PERCENT);
+
     let mut window_step = 0u32;
+    let mut heat_window_step = 0u32;
+    let mut last_target_c = status::get_target_temp_c();
     let startup_frame = pixel_frame(controller::Rgb8 {
         red: 0,
         green: 0,
@@ -217,8 +244,12 @@ async fn main(spawner: Spawner) -> ! {
             &mut delay,
             &mut one_wire_pin,
             &mut relay,
+            &mut heat_relay,
             &mut pid,
+            &mut heat_pid,
             &mut window_step,
+            &mut heat_window_step,
+            &mut last_target_c,
         )
         .await;
 

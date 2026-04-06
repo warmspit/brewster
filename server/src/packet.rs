@@ -3,7 +3,7 @@
 
 //! Brewster UDP telemetry packet codec.
 //!
-//! Wire format — 53 bytes, little-endian (version 3):
+//! Wire format — 57 bytes, little-endian (version 5):
 //!
 //! ```text
 //!  [0..4]   magic: b"BREW"
@@ -16,10 +16,11 @@
 //!  [37..39] temp_centi[2]: i16 LE  (sensor 2;      i16::MAX = no reading)
 //!  [39..41] target_centi: i16 LE
 //!  [41]     output_pct: u8          (0–100 %)
-//!  [42]     flags: u8               bit 0 = relay_on
+//!  [42]     flags: u8               bit 0 = relay_on (cool SSR)
 //!                                   bit 1 = collecting
 //!                                   bit 2 = ntp_synced
 //!                                   bit 3 = history_clear (one-shot)
+//!                                   bit 4 = heat_on (heat SSR)
 //!  [43]     window_step: u8         (0–15)
 //!  [44]     on_steps: u8            (0–15)
 //!  [45]     sensor_status[0]: u8
@@ -27,11 +28,15 @@
 //!  [47]     sensor_status[2]: u8
 //!  [48..52] device_ip: [u8; 4]
 //!  [52]     sensor_count: u8        (number of configured probes, 1–3)
+//!  [53]     deadband_centi: u8      (total dead zone width in 0.01 °C steps, 0–2.55 °C)
+//!  [54]     pid_p_pct: i8           (active PID proportional term, %)
+//!  [55]     pid_i_pct: i8           (active PID integral term, %)
+//!  [56]     pid_d_pct: i8           (active PID derivative term, %)
 //! ```
 
 pub const PACKET_MAGIC: &[u8; 4] = b"BREW";
-pub const PACKET_VERSION: u8 = 3;
-pub const PACKET_SIZE: usize = 53;
+pub const PACKET_VERSION: u8 = 5;
+pub const PACKET_SIZE: usize = 57;
 #[allow(dead_code)]
 pub const HOSTNAME_LEN: usize = 20;
 pub const TEMP_NONE: i16 = i16::MAX;
@@ -55,12 +60,21 @@ pub struct Packet {
     /// Set in the first packet after the device clears its history.
     /// The server uses this to clear its own ring buffer.
     pub history_clear: bool,
+    pub heat_on: bool,
     pub window_step: u8,
     pub on_steps: u8,
     /// Raw status codes per sensor (0 = ok).
     pub sensor_status: [u8; 3],
     pub device_ip: [u8; 4],
     pub sensor_count: u8,
+    /// Total dead zone width in °C (neither relay fires within ±deadband_c/2 of target).
+    pub deadband_c: f32,
+    /// Active PID proportional term contribution (%).
+    pub pid_p_pct: i8,
+    /// Active PID integral term contribution (%).
+    pub pid_i_pct: i8,
+    /// Active PID derivative term contribution (%).
+    pub pid_d_pct: i8,
 }
 
 impl Packet {
@@ -104,11 +118,16 @@ impl Packet {
         let collecting = flags & 0x02 != 0;
         let ntp_synced = flags & 0x04 != 0;
         let history_clear = flags & 0x08 != 0;
+        let heat_on = flags & 0x10 != 0;
         let window_step = buf[43];
         let on_steps = buf[44];
         let sensor_status = [buf[45], buf[46], buf[47]];
         let device_ip = [buf[48], buf[49], buf[50], buf[51]];
         let sensor_count = buf[52].clamp(1, 3);
+        let deadband_c = buf[53] as f32 / 100.0;
+        let pid_p_pct = buf[54] as i8;
+        let pid_i_pct = buf[55] as i8;
+        let pid_d_pct = buf[56] as i8;
 
         Some(Packet {
             version,
@@ -122,15 +141,20 @@ impl Packet {
             collecting,
             ntp_synced,
             history_clear,
+            heat_on,
             window_step,
             on_steps,
             sensor_status,
             device_ip,
             sensor_count,
+            deadband_c,
+            pid_p_pct,
+            pid_i_pct,
+            pid_d_pct,
         })
     }
 
-    /// Encode into a 53-byte buffer — used only in tests.
+    /// Encode into a 54-byte buffer — used only in tests.
     #[allow(dead_code)]
     pub fn encode(&self) -> [u8; PACKET_SIZE] {
         let mut buf = [0u8; PACKET_SIZE];
@@ -164,6 +188,10 @@ impl Packet {
         buf[47] = self.sensor_status[2];
         buf[48..52].copy_from_slice(&self.device_ip);
         buf[52] = self.sensor_count;
+        buf[53] = (self.deadband_c * 100.0).clamp(0.0, 255.0) as u8;
+        buf[54] = self.pid_p_pct as u8;
+        buf[55] = self.pid_i_pct as u8;
+        buf[56] = self.pid_d_pct as u8;
         buf
     }
 }
@@ -185,11 +213,17 @@ mod tests {
             relay_on: true,
             collecting: true,
             ntp_synced: false,
+            history_clear: false,
+            heat_on: false,
             window_step: 3,
             on_steps: 5,
             sensor_status: [0, 255, 0],
             device_ip: [192, 168, 1, 100],
             sensor_count: 2,
+            deadband_c: 0.5,
+            pid_p_pct: 14,
+            pid_i_pct: 3,
+            pid_d_pct: -2,
         };
         let buf = pkt.encode();
         assert_eq!(buf.len(), PACKET_SIZE);
