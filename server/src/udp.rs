@@ -3,20 +3,20 @@
 
 //! UDP telemetry receiver — decodes incoming packets and inserts into the store.
 //!
-//! # Nonce-based session filtering
+//! # Hostname-based device filtering
 //!
-//! Each ESP32 generates a random 32-bit nonce at boot and includes it in every
-//! packet.  The receiver tracks the *current* accepted nonce:
+//! Each packet carries the sender's hostname (max 20 bytes, null-padded).  The
+//! receiver tracks the *current* accepted hostname:
 //!
-//! - On the **first** packet (`current == 0`), the nonce is accepted and recorded.
-//! - When a packet arrives with a **new** nonce, it is accepted and the current
-//!   nonce is updated (the new device session takes over; the store is cleared so
-//!   stale history from the previous session is discarded).
-//! - Any packet whose nonce does **not** match the current nonce is **silently
-//!   dropped** — this prevents stale or stray devices from polluting the store.
+//! - On the **first** packet (hostname slot all-zero), the hostname is recorded.
+//! - When a packet arrives with a **new** hostname, it is accepted, the current
+//!   hostname is updated, and the store is cleared so stale history from the
+//!   previous device is discarded.
+//! - Any packet whose hostname does **not** match the current hostname is
+//!   **silently dropped** — this prevents stray devices from polluting the store.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::RwLock;
 
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
@@ -26,8 +26,14 @@ use crate::packet;
 use crate::persist;
 use crate::store::Store;
 
-/// Nonce of the currently accepted ESP32 session; 0 = not yet established.
-static CURRENT_NONCE: AtomicU32 = AtomicU32::new(0);
+/// Hostname of the currently accepted device; all-zero = not yet established.
+static CURRENT_HOSTNAME: RwLock<[u8; 20]> = RwLock::new([0u8; 20]);
+
+fn hostname_display(bytes: &[u8; 20]) -> &str {
+    std::str::from_utf8(bytes)
+        .unwrap_or("<invalid-utf8>")
+        .trim_end_matches('\0')
+}
 
 /// Receive telemetry packets forever, inserting each valid one into `store`.
 /// Sends `()` on `notify` after each successfully decoded packet.
@@ -50,23 +56,29 @@ pub async fn run(sock: UdpSocket, store: Store, notify: broadcast::Sender<()>, d
             }
         };
 
-        // --- nonce check ---
-        let current = CURRENT_NONCE.load(Ordering::Relaxed);
-        if current == 0 {
-            // First packet ever: accept and record this device session.
-            CURRENT_NONCE.store(pkt.nonce, Ordering::Relaxed);
-            info!("udp: new session nonce {:#010x} from {peer}", pkt.nonce);
-        } else if pkt.nonce != current {
-            // A different nonce arrived — new device session takes over.
+        // --- hostname check ---
+        let current = *CURRENT_HOSTNAME.read().unwrap();
+        if current == [0u8; 20] {
+            // First packet: record this device's hostname.
+            *CURRENT_HOSTNAME.write().unwrap() = pkt.hostname;
             info!(
-                "udp: nonce changed {:#010x} -> {:#010x} from {peer}; clearing store",
-                current, pkt.nonce
+                "udp: accepted device '{}' from {peer}",
+                hostname_display(&pkt.hostname)
             );
-            CURRENT_NONCE.store(pkt.nonce, Ordering::Relaxed);
+        } else if pkt.hostname != current {
+            // Different hostname — new device takes over.
+            info!(
+                "udp: device changed '{}' -> '{}' from {peer}; clearing store",
+                hostname_display(&current),
+                hostname_display(&pkt.hostname)
+            );
+            *CURRENT_HOSTNAME.write().unwrap() = pkt.hostname;
             store.clear();
             persist::clear(&data_path);
+        } else {
+            // Hostname matches — drop packets from other devices silently.
+            // (Nothing to do; fall through to insert.)
         }
-        // At this point the nonce matches (or was just accepted).
 
         if pkt.history_clear {
             store.clear();

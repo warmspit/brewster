@@ -263,7 +263,7 @@ impl Store {
             }
             let packet = Packet {
                 version: PACKET_VERSION,
-                nonce: 0,
+                hostname: [0u8; 20],
                 seq: r.seq,
                 uptime_s: r.uptime_s,
                 temps: [

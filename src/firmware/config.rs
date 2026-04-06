@@ -85,10 +85,33 @@ pub fn status_print_interval_cycles() -> u32 {
 }
 
 pub fn device_hostname() -> &'static str {
-    match DEVICE_HOSTNAME_CONFIG {
+    let raw = match DEVICE_HOSTNAME_CONFIG {
         Some(v) if !v.is_empty() => v,
         _ => DEVICE_HOSTNAME_DEFAULT,
+    };
+    // Enforce the 20-byte wire-format limit.
+    if raw.len() <= 20 {
+        raw
+    } else {
+        let mut end = 20;
+        while !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        &raw[..end]
     }
+}
+
+/// Maximum byte length of the hostname field in UDP telemetry packets.
+pub const HOSTNAME_MAX_LEN: usize = 20;
+
+/// Return the device hostname as a null-padded `[u8; 20]` array for
+/// embedding in the UDP wire format.  Truncates silently if longer than 20 bytes.
+pub fn device_hostname_bytes() -> [u8; HOSTNAME_MAX_LEN] {
+    let mut out = [0u8; HOSTNAME_MAX_LEN];
+    let src = device_hostname().as_bytes();
+    let len = src.len().min(HOSTNAME_MAX_LEN);
+    out[..len].copy_from_slice(&src[..len]);
+    out
 }
 
 pub fn temp_probe_name() -> &'static str {

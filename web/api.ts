@@ -12,6 +12,7 @@ export type SensorReading = {
 
 export type StatusPayload = {
   device: string;
+  hostname?: string;
   control_probe_index?: number;
   sensors: SensorReading[];
   pid: {

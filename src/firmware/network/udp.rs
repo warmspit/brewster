@@ -18,7 +18,7 @@
 //!
 //! # Telemetry wire format
 //!
-//! See `server/src/packet.rs` — 33 bytes, magic `b"BREW"` + version byte.
+//! See `server/src/packet.rs` — 53 bytes, magic `b"BREW"` + version byte.
 
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
@@ -35,8 +35,8 @@ use crate::firmware::{config, status};
 const PACKET_MAGIC: [u8; 4] = *b"BREW";
 /// Increment this whenever the wire layout changes so the server can detect
 /// format mismatches and drop stale packets cleanly.
-const PACKET_VERSION: u8 = 2;
-const PACKET_SIZE: usize = 37;
+const PACKET_VERSION: u8 = 3;
+const PACKET_SIZE: usize = 53;
 const TEMP_NONE: i16 = i16::MAX;
 
 /// Port the server broadcasts beacons TO; the firmware listens on this port.
@@ -57,20 +57,6 @@ static DISCOVERED_IP: AtomicU32 = AtomicU32::new(0);
 static DISCOVERED_PORT: AtomicU16 = AtomicU16::new(0);
 /// Device uptime (seconds) at the most recent successful discovery event.
 static DISCOVERED_UPTIME_S: AtomicU32 = AtomicU32::new(0);
-
-// ── Boot-time device nonce ────────────────────────────────────────────────────
-
-/// Random 32-bit value generated once at boot, embedded in every telemetry
-/// packet so the server can identify this device session and discard packets
-/// from stale or different devices.
-static DEVICE_NONCE: AtomicU32 = AtomicU32::new(0);
-
-/// Initialise the device nonce from the hardware RNG.  Must be called once
-/// during start-up, before the telemetry task begins sending packets.
-pub(super) fn init_nonce(nonce: u32) {
-    DEVICE_NONCE.store(nonce, Ordering::Relaxed);
-    esp_println::println!("udp telemetry: session nonce = {:#010x}", nonce);
-}
 
 /// Record a freshly discovered server address and reset the expiry clock.
 /// Called on every received beacon (broadcast or mDNS).
@@ -346,22 +332,22 @@ fn build_packet() -> [u8; PACKET_SIZE] {
     let mut buf = [0u8; PACKET_SIZE];
     buf[0..4].copy_from_slice(&PACKET_MAGIC);
     buf[4] = PACKET_VERSION;
-    buf[5..9].copy_from_slice(&DEVICE_NONCE.load(Ordering::Relaxed).to_le_bytes());
-    buf[9..13].copy_from_slice(&seq.to_le_bytes());
-    buf[13..17].copy_from_slice(&uptime_s.to_le_bytes());
-    buf[17..19].copy_from_slice(&temp0.to_le_bytes());
-    buf[19..21].copy_from_slice(&temp1.to_le_bytes());
-    buf[21..23].copy_from_slice(&temp2.to_le_bytes());
-    buf[23..25].copy_from_slice(&target_centi.to_le_bytes());
-    buf[25] = output_pct;
-    buf[26] = flags;
-    buf[27] = snap.pid_window_step;
-    buf[28] = snap.pid_on_steps;
-    buf[29] = snap.sensor_status_code;
-    buf[30] = status::sensor_status(1);
-    buf[31] = status::sensor_status(2);
-    buf[32..36].copy_from_slice(&ip);
-    buf[36] = sensor_count;
+    buf[5..25].copy_from_slice(&config::device_hostname_bytes());
+    buf[25..29].copy_from_slice(&seq.to_le_bytes());
+    buf[29..33].copy_from_slice(&uptime_s.to_le_bytes());
+    buf[33..35].copy_from_slice(&temp0.to_le_bytes());
+    buf[35..37].copy_from_slice(&temp1.to_le_bytes());
+    buf[37..39].copy_from_slice(&temp2.to_le_bytes());
+    buf[39..41].copy_from_slice(&target_centi.to_le_bytes());
+    buf[41] = output_pct;
+    buf[42] = flags;
+    buf[43] = snap.pid_window_step;
+    buf[44] = snap.pid_on_steps;
+    buf[45] = snap.sensor_status_code;
+    buf[46] = status::sensor_status(1);
+    buf[47] = status::sensor_status(2);
+    buf[48..52].copy_from_slice(&ip);
+    buf[52] = sensor_count;
     buf
 }
 

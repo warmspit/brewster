@@ -1008,6 +1008,8 @@ const updateFromStatus = (
   }
 
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
+  const hostnameEl = document.getElementById("device-hostname");
+  if (hostnameEl) hostnameEl.textContent = data.hostname ?? "";
   setText("updated", new Date().toLocaleTimeString());
   if (data.system && data.system.uptime_s !== null) {
     setText("uptime", formatUptime(data.system.uptime_s));
