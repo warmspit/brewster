@@ -26,6 +26,8 @@ use crate::store::Store;
 struct AppState {
     store: Store,
     device_name: String,
+    /// Probe names from SENSOR_NAMES env var (index 0 = first sensor).
+    sensor_names: Vec<String>,
     /// Port the device's embedded HTTP server listens on (default 80).
     device_http_port: u16,
     /// Shared reqwest client for forwarding commands to the device.
@@ -43,6 +45,7 @@ pub fn router(
     web_dir: PathBuf,
     notify: broadcast::Sender<()>,
     data_file: std::path::PathBuf,
+    sensor_names: Vec<String>,
 ) -> Router {
     // Static file service for the dashboard assets.
     // SetResponseHeaderLayer::if_not_present adds Cache-Control: no-cache to static files
@@ -71,6 +74,7 @@ pub fn router(
         .with_state(AppState {
             store,
             device_name,
+            sensor_names,
             device_http_port,
             client: reqwest::Client::new(),
             notify,
@@ -136,6 +140,7 @@ async fn get_status(
     State(AppState {
         store,
         device_name,
+        sensor_names,
         device_http_port,
         ..
     }): State<AppState>,
@@ -154,9 +159,14 @@ async fn get_status(
             } else {
                 Some(pkt.temps[i])
             };
+            let name = sensor_names
+                .get(i)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("probe-{}", i + 1));
             SensorJson {
                 index: i as u8,
-                name: format!("probe-{}", i + 1),
+                name,
                 temperature_f: temp_c.map(|c| c * 9.0 / 5.0 + 32.0),
                 temperature_c: temp_c,
                 error: sensor_error_label(pkt.sensor_status[i]),
