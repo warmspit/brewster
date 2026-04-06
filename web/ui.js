@@ -11,7 +11,8 @@ export const byId = (id) => {
 };
 
 export const setText = (id, text) => {
-  byId(id).textContent = text;
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
 };
 
 export const formatTemp = (value, unit) => {

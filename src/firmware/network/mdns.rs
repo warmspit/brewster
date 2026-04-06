@@ -449,6 +449,12 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
             let ipv4 = status::ip_octets();
             let ipv6 = current_ipv6_octets(stack);
 
+            // Opportunistically scan every incoming mDNS packet for a
+            // _brewster._udp.local. service announcement from the LAN server.
+            if let Some((ip, port)) = try_find_brewster_service(packet) {
+                super::udp::set_discovered_server(ip, port);
+            }
+
             let Some((n, question)) = build_mdns_response(packet, hostname, ipv4, ipv6, send_buf)
             else {
                 continue;
@@ -483,4 +489,160 @@ pub(super) async fn mdns_task(stack: Stack<'static>) {
 
 fn current_ipv6_octets(stack: Stack<'static>) -> Option<[u8; 16]> {
     stack.config_v6().map(|cfg| cfg.address.address().octets())
+}
+
+// ── Brewster server discovery via mDNS ───────────────────────────────────────
+
+/// Scan an incoming mDNS packet for a `_brewster._udp.local.` PTR record
+/// (sent by `brewster-server` as a gratuitous announcement).  When found,
+/// returns `(server_ipv4, telemetry_udp_port)` extracted from the accompanying
+/// SRV and A records in the same packet.
+///
+/// Parsing strategy (one pass):
+/// 1. Walk all resource records in answer + additional sections.
+/// 2. Flag if any PTR owner name contains the label `_brewster`.
+/// 3. Collect the first SRV port and the first A-record IP from the packet.
+/// 4. If the flag is set and we have an IP, return the result.
+fn try_find_brewster_service(packet: &[u8]) -> Option<([u8; 4], u16)> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    // Must be a DNS response (QR bit set).
+    if flags & 0x8000 == 0 {
+        return None;
+    }
+
+    let qdcount = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+    let ancount = u16::from_be_bytes([packet[6], packet[7]]) as usize;
+    let arcount = u16::from_be_bytes([packet[10], packet[11]]) as usize;
+
+    let mut offset = 12usize;
+
+    // Skip questions.
+    for _ in 0..qdcount {
+        offset = mdns_skip_name(packet, offset)?;
+        offset = offset.checked_add(4)?; // qtype + qclass
+    }
+
+    let mut has_brewster_ptr = false;
+    let mut srv_port: Option<u16> = None;
+    let mut a_ip: Option<[u8; 4]> = None;
+
+    // Walk answer + additional records.
+    for _ in 0..(ancount + arcount) {
+        if offset >= packet.len() {
+            break;
+        }
+        let name_start = offset;
+        let after_name = mdns_skip_name(packet, offset)?;
+        if after_name + 10 > packet.len() {
+            break;
+        }
+        let rtype = u16::from_be_bytes([packet[after_name], packet[after_name + 1]]);
+        let rdlen = u16::from_be_bytes([packet[after_name + 8], packet[after_name + 9]]) as usize;
+        let rdata_start = after_name + 10;
+        if rdata_start + rdlen > packet.len() {
+            break;
+        }
+        let rdata = &packet[rdata_start..rdata_start + rdlen];
+
+        match rtype {
+            12 => {
+                // PTR record — check if the OWNER name contains `_brewster`.
+                if mdns_name_has_label(packet, name_start, b"_brewster") {
+                    has_brewster_ptr = true;
+                }
+            }
+            33 => {
+                // SRV record — port is at rdata[4..6] (after priority + weight).
+                if rdlen >= 6 {
+                    srv_port = Some(u16::from_be_bytes([rdata[4], rdata[5]]));
+                }
+            }
+            1 => {
+                // A record — raw IPv4.
+                if rdlen == 4 {
+                    a_ip = Some([rdata[0], rdata[1], rdata[2], rdata[3]]);
+                }
+            }
+            _ => {}
+        }
+
+        offset = rdata_start + rdlen;
+    }
+
+    if has_brewster_ptr {
+        let ip = a_ip?;
+        let port = srv_port.unwrap_or(crate::firmware::config::UDP_SERVER_PORT_DEFAULT);
+        Some((ip, port))
+    } else {
+        None
+    }
+}
+
+/// Skip over a DNS name (with pointer support) starting at `offset`.
+/// Returns the byte index immediately after the name, or `None` on error.
+fn mdns_skip_name(packet: &[u8], mut offset: usize) -> Option<usize> {
+    let mut depth = 0u8;
+    loop {
+        if offset >= packet.len() {
+            return None;
+        }
+        let len_byte = packet[offset];
+        if (len_byte & 0xC0) == 0xC0 {
+            // Compression pointer — 2 bytes total; we don't need to follow it
+            // because we only want the position after the name field.
+            return offset.checked_add(2);
+        }
+        if len_byte == 0 {
+            return offset.checked_add(1);
+        }
+        if (len_byte & 0xC0) != 0 {
+            return None; // Reserved bits set — malformed.
+        }
+        offset = offset.checked_add(1 + len_byte as usize)?;
+        depth = depth.saturating_add(1);
+        if depth > 16 {
+            return None; // Loop guard.
+        }
+    }
+}
+
+/// Returns `true` if expanding the DNS name at `offset` produces any label
+/// equal to `target`.  Follows compression pointers.
+fn mdns_name_has_label(packet: &[u8], mut offset: usize, target: &[u8]) -> bool {
+    let mut depth = 0u8;
+    loop {
+        if offset >= packet.len() || depth > 16 {
+            return false;
+        }
+        let len_byte = packet[offset];
+        if (len_byte & 0xC0) == 0xC0 {
+            // Follow the pointer.
+            if offset + 1 >= packet.len() {
+                return false;
+            }
+            let ptr = (((len_byte & 0x3F) as usize) << 8) | packet[offset + 1] as usize;
+            offset = ptr;
+            depth = depth.saturating_add(1);
+            continue;
+        }
+        if len_byte == 0 {
+            return false; // End of name, label not found.
+        }
+        if (len_byte & 0xC0) != 0 {
+            return false; // Malformed.
+        }
+        let label_start = offset + 1;
+        let label_end = label_start + len_byte as usize;
+        if label_end > packet.len() {
+            return false;
+        }
+        if &packet[label_start..label_end] == target {
+            return true;
+        }
+        offset = label_end;
+        depth = depth.saturating_add(1);
+    }
 }

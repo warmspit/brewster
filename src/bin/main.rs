@@ -122,6 +122,14 @@ async fn main(spawner: Spawner) -> ! {
         );
     }
 
+    // Restore collection state from flash so a power cycle resumes collection.
+    if status::collection_enabled_persisted() {
+        status::set_collection_enabled(true);
+        println!("collection: resumed from flash (was active before reboot)");
+    } else {
+        println!("collection: starting idle (not active before reboot)");
+    }
+
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
@@ -202,8 +210,7 @@ async fn main(spawner: Spawner) -> ! {
         )
         .await;
 
-        // Steady green after boot. During HTTP exchanges, show blue; on HTTP error, show red.
-        // Outside HTTP exchanges, any runtime error (for example sensor probe failures) is red.
+        // Priority: HTTP error (red) > HTTP ok (blue) > UDP send (violet) > idle.
         let display_color = match status::http_led_state() {
             status::HttpLedState::Idle => {
                 if status::runtime_error_active() {
@@ -211,6 +218,12 @@ async fn main(spawner: Spawner) -> ! {
                         red: 10,
                         green: 0,
                         blue: 0,
+                    }
+                } else if status::udp_led_active() {
+                    controller::Rgb8 {
+                        red: 6,
+                        green: 0,
+                        blue: 10,
                     }
                 } else {
                     controller::Rgb8 {

@@ -32,3 +32,7 @@ TODO
 
 # Local runtime/build secrets at repo root
 config.local.toml
+
+# Server persistence data (runtime-generated, not source)
+brewster-data.json
+brewster-data.json.tmp

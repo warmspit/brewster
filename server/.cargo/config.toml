@@ -1,0 +1,5 @@
+# Override the workspace-level ESP32 target so the server crate builds
+# for the host machine (macOS/Linux) rather than xtensa-esp32s3-none-elf.
+[build]
+target = "aarch64-apple-darwin"
+rustflags = []

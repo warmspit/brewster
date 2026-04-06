@@ -4,7 +4,7 @@
     {
       "label": "build-and-flash-esp32s3",
       "type": "shell",
-      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf && espflash flash --partition-table partitions.csv target/xtensa-esp32s3-none-elf/debug/brewster",
+      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc && espflash flash --partition-table partitions.csv target/xtensa-esp32s3-none-elf/debug/brewster",
       "group": {
         "kind": "build",
         "isDefault": true
@@ -22,7 +22,7 @@
     {
       "label": "cargo build",
       "type": "shell",
-      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf",
+      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc",
       "group": "build",
       "problemMatcher": [
         "$rustc"
@@ -37,7 +37,7 @@
     {
       "label": "cargo check",
       "type": "shell",
-      "command": ". ~/export-esp.sh && cargo check --target xtensa-esp32s3-none-elf",
+      "command": ". ~/export-esp.sh && cargo check --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc",
       "group": "build",
       "problemMatcher": [
         "$rustc"
@@ -110,7 +110,7 @@
     {
       "label": "debug-server",
       "type": "shell",
-      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf && espflash flash --partition-table partitions.csv target/xtensa-esp32s3-none-elf/debug/brewster && ${workspaceFolder}/scripts/openocd-esp32s3-debug.sh",
+      "command": ". ~/export-esp.sh && cargo build --target xtensa-esp32s3-none-elf -Zbuild-std=core,alloc && espflash flash --partition-table partitions.csv target/xtensa-esp32s3-none-elf/debug/brewster && ${workspaceFolder}/scripts/openocd-esp32s3-debug.sh",
       "isBackground": true,
       "presentation": {
         "echo": true,

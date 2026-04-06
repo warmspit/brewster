@@ -15,7 +15,8 @@ export const byId = <T extends HTMLElement>(id: string): T => {
 };
 
 export const setText = (id: string, text: string): void => {
-  byId<HTMLElement>(id).textContent = text;
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
 };
 
 export const formatTemp = (value: NullableNumber, unit: "C" | "F"): string => {

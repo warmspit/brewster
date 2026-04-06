@@ -13,6 +13,12 @@ NTP_SERVERS = "129.6.15.28,194.58.204.20"
 # Optional fallback when NTP_SERVERS is empty or invalid
 NTP_SERVER = "8.8.8.8"
 
+# UDP telemetry server (optional).  Set UDP_SERVER_IP to enable.
+# brewster-server listens on port 47890 by default; run it on any LAN host.
+# The dashboard served by the server is then accessible on http://<server>:8080
+# UDP_SERVER_IP = "192.168.1.50"
+# UDP_SERVEtheR_PORT = "47890"
+
 [device]
 hostname = "brewster"
 

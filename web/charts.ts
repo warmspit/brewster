@@ -69,6 +69,8 @@ export const drawNoData = (ctx: CanvasRenderingContext2D, width: number, height:
 export class Sparkline {
   readonly canvas: HTMLCanvasElement;
   private readonly values: number[] = [];
+  private targetValues: number[] = [];
+  private gapBefore: Set<number> = new Set();
   private hoverX: number | null = null;
   private elapsedSeconds: number | null = null;
   private rafId: number | null = null;
@@ -86,6 +88,11 @@ export class Sparkline {
 
   setValues(values: number[]): void {
     this.values.splice(0, this.values.length, ...values);
+    this.draw();
+  }
+
+  setGapBefore(indices: number[]): void {
+    this.gapBefore = new Set(indices);
     this.draw();
   }
 
@@ -122,13 +129,32 @@ export class Sparkline {
     }
   }
 
+  /** Mark the next pushed value as the start of a new data segment (draws as a gap). */
+  markGapBeforeNext(): void {
+    this.pendingGap = true;
+  }
+
   push(value: number): void {
+    if (this.pendingGap) {
+      this.gapBefore.add(this.values.length);
+      this.pendingGap = false;
+    }
     this.values.push(value);
     this.draw();
   }
 
+  setTargetValues(values: number[]): void {
+    this.targetValues = values.slice();
+    this.draw();
+  }
+
+  pushTarget(value: number): void {
+    this.targetValues.push(value);
+  }
+
   clear(): void {
     this.values.length = 0;
+    this.targetValues.length = 0;
     this.draw();
   }
 
@@ -230,18 +256,54 @@ export class Sparkline {
     ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
     ctx.clip();
     ctx.lineWidth = 2;
-    ctx.strokeStyle = gradient;
-    ctx.beginPath();
-    for (let i = iFirst; i <= iLast; i++) {
-      const x = xForIdx(i);
-      const y = yFor(this.values[i]);
-      if (i === iFirst) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
+
+    // Draw in segments: normal gradient for connected data, red for gap-crossing segments.
+    const drawSegment = (segStart: number, segEnd: number, isGap: boolean): void => {
+      if (segStart >= segEnd) return;
+      ctx.beginPath();
+      ctx.strokeStyle = isGap ? "rgba(255, 80, 80, 0.75)" : gradient;
+      for (let i = segStart; i <= segEnd; i++) {
+        const x = xForIdx(i);
+        const y = yFor(this.values[i]);
+        if (i === segStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    };
+
+    let segStart = iFirst;
+    for (let i = iFirst + 1; i <= iLast; i++) {
+      if (this.gapBefore.has(i)) {
+        // Draw run up to the gap end in normal color, then the gap-crossing segment in red.
+        drawSegment(segStart, i - 1, false);
+        drawSegment(i - 1, i, true);
+        segStart = i;
       }
     }
-    ctx.stroke();
+    drawSegment(segStart, iLast, false);
+
+    if (this.targetValues.length > 1) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
+      ctx.clip();
+      ctx.beginPath();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "#f7d774";
+      ctx.setLineDash([5, 4]);
+      let tStarted = false;
+      for (let i = iFirst; i <= iLast; i++) {
+        if (i >= this.targetValues.length) break;
+        const v = this.targetValues[i];
+        if (!Number.isFinite(v)) { tStarted = false; continue; }
+        const x = xForIdx(i);
+        const y = yFor(v);
+        if (!tStarted) { ctx.moveTo(x, y); tStarted = true; } else { ctx.lineTo(x, y); }
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
     ctx.restore();
 
     if (this.hoverX !== null && this.values.length > 0) {
@@ -252,7 +314,9 @@ export class Sparkline {
       const x = clampedX;
       const y = yFor(value);
       const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
-      const tip = `${value.toFixed(2)} C  T+${formatElapsed(Math.round(hoverTime))}`;
+      const targetAtIdx = index < this.targetValues.length ? this.targetValues[index] : NaN;
+      const targetStr = Number.isFinite(targetAtIdx) ? `  tgt:${targetAtIdx.toFixed(1)}` : "";
+      const tip = `${value.toFixed(2)} C${targetStr}  T+${formatElapsed(Math.round(hoverTime))}`;
 
       ctx.save();
       ctx.strokeStyle = "rgba(255,255,255,0.35)";
@@ -404,7 +468,6 @@ export class PidChart {
     const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
 
     const leftSeries = [
-      { color: "#f7d774", value: (p: PidSample) => p.target_c },
       { color: "#6ec5ff", value: (p: PidSample) => p.kp },
       { color: "#8ef0c8", value: (p: PidSample) => p.ki },
       { color: "#b28cff", value: (p: PidSample) => p.kd },
@@ -554,7 +617,7 @@ export class PidChart {
       const signedOutput = PidChart.signedOutput(sample);
       const relayMode = sample.relay_on ? "cool" : "off";
       const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
-      const tip2 = `t:${sample.target_c.toFixed(1)} kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
+      const tip2 = `kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
       const tip3 = `drv:${signedOutput.toFixed(2)} win:${sample.window_step} on:${sample.on_steps} r:${relayMode}`;
 
       ctx.save();

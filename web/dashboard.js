@@ -12,7 +12,8 @@ const byId = (id) => {
 };
 
 const setText = (id, text) => {
-  byId(id).textContent = text;
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
 };
 
 const formatTemp = (value, unit) => {
@@ -69,7 +70,8 @@ const updateNtpPill = (synced) => {
 };
 
 // --- api.js ---
-const HISTORY_FETCH_POINTS = 400;
+const HISTORY_LOAD_POINTS  = 10000; // full replay on page load — fetch as many records as the server holds
+const HISTORY_MERGE_POINTS =   120; // only need last ~2 min on each 1-second poll tick
 
 const submitTargetTemperature = async (tempC) => {
   const response = await fetch("/temperature", {
@@ -123,7 +125,7 @@ const CHART_CANVAS_HEIGHT = 220;
 const NO_DATA_FONT = "700 20px 'Avenir Next', 'Trebuchet MS', sans-serif";
 
 const CHART_LAYOUT = {
-  axisPadLeft: 46,
+  axisPadLeft: 58,
   plotPadTop: 8,
   plotPadBottom: 8,
   sparklinePadRight: 6,
@@ -183,19 +185,17 @@ const drawNoData = (ctx, width, height) => {
 };
 
 class Sparkline {
-  constructor(canvas) {
+  constructor(canvas, { showTarget = true } = {}) {
     this.canvas = canvas;
+    this._showTarget = showTarget;
     this._values = [];
+    this._targetValues = [];
+    this._gapBefore = new Set();
+    this._pendingGap = false;
     this._hoverX = null;
     this._elapsedSeconds = null;
     this._rafId = null;
-    this.canvas.addEventListener("mousemove", (event) => {
-      this._updateHover(event.clientX);
-    });
-    this.canvas.addEventListener("mouseleave", () => {
-      this._hoverX = null;
-      this._draw();
-    });
+    // Hover is driven externally via setHoverRatio() broadcast from the section-level listener.
   }
 
   setValues(values) {
@@ -208,11 +208,20 @@ class Sparkline {
     this._draw();
   }
 
+  setGapBefore(indices) {
+    this._gapBefore = new Set(indices);
+    this._draw();
+  }
+
+  markGapBeforeNext() {
+    this._pendingGap = true;
+  }
+
   setHoverRatio(ratio) {
     if (ratio === null) {
       if (this._hoverX !== null) {
         this._hoverX = null;
-        this._draw();
+        this._drawNow();
       }
       return;
     }
@@ -222,7 +231,7 @@ class Sparkline {
     const x = axisPadLeft + clampedRatio * plotWidth;
     if (this._hoverX !== x) {
       this._hoverX = x;
-      this._draw();
+      this._drawNow();
     }
   }
 
@@ -236,12 +245,26 @@ class Sparkline {
   }
 
   push(value) {
+    if (this._pendingGap) {
+      this._gapBefore.add(this._values.length);
+      this._pendingGap = false;
+    }
     this._values.push(value);
     this._draw();
   }
 
+  setTargetValues(values) {
+    this._targetValues = values.slice();
+    this._draw();
+  }
+
+  pushTarget(value) {
+    this._targetValues.push(value);
+  }
+
   clear() {
     this._values.length = 0;
+    this._targetValues.length = 0;
     this._draw();
   }
 
@@ -287,6 +310,17 @@ class Sparkline {
       if (v < min) min = v;
       if (v > max) max = v;
     }
+    // Include the target temperature in the Y scale so its line always stays
+    // within the plot area and doesn't cause the scale to behave erratically.
+    if (this._showTarget) {
+      for (let i = iFirst; i <= iLast; i++) {
+        if (i >= this._targetValues.length) break;
+        const v = this._targetValues[i];
+        if (!Number.isFinite(v)) continue;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+    }
     const spread = Math.max(0.1, max - min);
 
     const yFor = (v) => {
@@ -304,17 +338,20 @@ class Sparkline {
     ctx.stroke();
 
     const tickValues = [max, min + spread / 2, min];
+    const decimals = spread >= 10 ? 0 : spread >= 0.5 ? 1 : 2;
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
     ctx.textAlign = "right";
     tickValues.forEach((tickValue) => {
+      const label = `${tickValue.toFixed(decimals)}°C`;
       const y = yFor(tickValue);
       ctx.strokeStyle = axisColor;
       ctx.beginPath();
       ctx.moveTo(axisPadLeft, y);
       ctx.lineTo(width - 4, y);
       ctx.stroke();
-      ctx.fillText(`${tickValue.toFixed(1)}°C`, axisPadLeft - 4, y + 4);
+      const textY = Math.max(14, Math.min(y + 4, height - 4));
+      ctx.fillText(label, axisPadLeft - 4, textY);
     });
     ctx.textAlign = "left";
 
@@ -338,6 +375,28 @@ class Sparkline {
     gradient.addColorStop(0, "#40c4ff");
     gradient.addColorStop(1, "#40d990");
 
+    // Smooth out DS18B20 quantization noise (±1 LSB = ±0.0625°C at 1Hz)
+    // with a small moving-average window. Window shrinks near gap boundaries
+    // so gaps don't bleed across segments.
+    const SMOOTH_HALF = 2; // ±2 samples → 5-sample window
+    const smoothed = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      let sum = 0, count = 0;
+      for (let k = i - SMOOTH_HALF; k <= i + SMOOTH_HALF; k++) {
+        if (k < 0 || k >= n) continue;
+        // Don't average across a gap boundary.
+        if (k > i && this._gapBefore.has(k)) break;
+        if (k < i) {
+          let crossesGap = false;
+          for (let g = k + 1; g <= i; g++) { if (this._gapBefore.has(g)) { crossesGap = true; break; } }
+          if (crossesGap) continue;
+        }
+        sum += this._values[k];
+        count++;
+      }
+      smoothed[i] = count > 0 ? sum / count : this._values[i];
+    }
+
     ctx.save();
     ctx.beginPath();
     ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
@@ -347,15 +406,71 @@ class Sparkline {
     ctx.beginPath();
     for (let i = iFirst; i <= iLast; i++) {
       const x = xForIdx(i);
-      const y = yFor(this._values[i]);
-      if (i === iFirst) {
+      const y = yFor(smoothed[i]);
+      if (i === iFirst || this._gapBefore.has(i)) {
         ctx.moveTo(x, y);
       } else {
         ctx.lineTo(x, y);
       }
     }
     ctx.stroke();
+
+    // Draw red vertical marks at gap positions.
+    if (this._gapBefore.size > 0) {
+      ctx.strokeStyle = "#ff4444";
+      ctx.lineWidth = 2;
+      for (const gi of this._gapBefore) {
+        if (gi < iFirst || gi > iLast) continue;
+        const x = xForIdx(gi);
+        ctx.beginPath();
+        ctx.moveTo(x, plotPadTop);
+        ctx.lineTo(x, height - plotPadBottom);
+        ctx.stroke();
+      }
+    }
     ctx.restore();
+
+    if (this._targetValues.length > 1 && this._showTarget) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
+      ctx.clip();
+      ctx.beginPath();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "#f7d774";
+      ctx.setLineDash([5, 4]);
+      let tStarted = false;
+      let prevTargetY = null;
+      const targetTransitions = []; // {x, yFrom, yTo} for each step change
+      for (let i = iFirst; i <= iLast; i++) {
+        if (i >= this._targetValues.length) break;
+        const v = this._targetValues[i];
+        if (!Number.isFinite(v)) { tStarted = false; prevTargetY = null; continue; }
+        const x = xForIdx(i);
+        const y = yFor(v);
+        // When the target value steps to a new level, start a fresh sub-path so
+        // the dashed line never draws a diagonal/vertical connector between the
+        // old and new setpoint — the target is a step function, not a ramp.
+        const yJumped = prevTargetY !== null && Math.abs(y - prevTargetY) > 0.5;
+        if (!tStarted || yJumped) {
+          if (yJumped) targetTransitions.push({ x, yFrom: prevTargetY, yTo: y });
+          ctx.moveTo(x, y); tStarted = true;
+        } else { ctx.lineTo(x, y); }
+        prevTargetY = y;
+      }
+      ctx.stroke();
+
+      // Draw dashed yellow vertical lines at each step-change transition point.
+      for (const tr of targetTransitions) {
+        ctx.beginPath();
+        ctx.moveTo(tr.x, Math.min(tr.yFrom, tr.yTo));
+        ctx.lineTo(tr.x, Math.max(tr.yFrom, tr.yTo));
+        ctx.stroke();
+      }
+
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
 
     if (this._hoverX !== null && this._values.length > 0) {
       const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this._hoverX));
@@ -365,7 +480,9 @@ class Sparkline {
       const x = clampedX;
       const y = yFor(value);
       const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
-      const tip = `${value.toFixed(2)} C  T+${formatElapsed(Math.round(hoverTime))}`;
+      const targetAtIdx = index < this._targetValues.length ? this._targetValues[index] : NaN;
+      const targetStr = Number.isFinite(targetAtIdx) ? `  tgt:${targetAtIdx.toFixed(1)}` : "";
+      const tip = `${value.toFixed(2)} C${targetStr}  T+${formatElapsed(Math.round(hoverTime))}`;
 
       ctx.save();
       ctx.strokeStyle = "rgba(255,255,255,0.35)";
@@ -427,13 +544,7 @@ class PidChart {
     this._hoverX = null;
     this._elapsedSeconds = null;
     this._rafId = null;
-    this.canvas.addEventListener("mousemove", (event) => {
-      this._updateHover(event.clientX);
-    });
-    this.canvas.addEventListener("mouseleave", () => {
-      this._hoverX = null;
-      this._draw();
-    });
+    // Hover is driven externally via setHoverRatio() broadcast from the section-level listener.
   }
 
   setValues(values) {
@@ -450,7 +561,7 @@ class PidChart {
     if (ratio === null) {
       if (this._hoverX !== null) {
         this._hoverX = null;
-        this._draw();
+        this._drawNow();
       }
       return;
     }
@@ -460,7 +571,7 @@ class PidChart {
     const x = axisPadLeft + clampedRatio * plotWidth;
     if (this._hoverX !== x) {
       this._hoverX = x;
-      this._draw();
+      this._drawNow();
     }
   }
 
@@ -514,16 +625,12 @@ class PidChart {
     const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
 
     const leftSeries = [
-      { color: "#f7d774", value: (p) => p.target_c },
-      { color: "#6ec5ff", value: (p) => p.kp },
-      { color: "#8ef0c8", value: (p) => p.ki },
-      { color: "#b28cff", value: (p) => p.kd },
-      { color: "#7cf3ff", value: (p) => p.window_step },
-      { color: "#ffb3d1", value: (p) => p.on_steps },
+      { color: "#40c4ff", value: (p) => p.kp },
+      { color: "#ffd740", value: (p) => p.ki },
+      { color: "#e040fb", value: (p) => p.kd },
     ];
     const rightSeries = [
-      { color: "#ff8d6e", value: (p) => PidChart._signedOutput(p) },
-      { color: "#ffffff", value: (p) => PidChart._signedRelay(p) },
+      { color: "#ff6d00", value: (p) => PidChart._signedOutput(p) },
     ];
 
     const n = this._values.length;
@@ -569,16 +676,19 @@ class PidChart {
     ctx.stroke();
 
     const leftTickValues = [leftMax, leftMin + leftSpread / 2, leftMin];
+    const leftDecimals = leftSpread >= 10 ? 0 : leftSpread >= 0.5 ? 1 : 2;
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
     ctx.textAlign = "right";
     leftTickValues.forEach((tickValue) => {
+      const label = tickValue.toFixed(leftDecimals);
       const y = yForLeft(tickValue);
       ctx.beginPath();
       ctx.moveTo(axisPadLeft, y);
       ctx.lineTo(width - axisPadRight, y);
       ctx.stroke();
-      ctx.fillText(`${tickValue.toFixed(1)}°C`, axisPadLeft - 4, y + 4);
+      const textY = Math.max(14, Math.min(y + 4, height - 4));
+      ctx.fillText(label, axisPadLeft - 4, textY);
     });
 
     const rightTicks = [
@@ -617,6 +727,21 @@ class PidChart {
     ctx.beginPath();
     ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
     ctx.clip();
+    // Draw relay first so it sits behind all other traces.
+    ctx.beginPath();
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = "#69f0ae";
+    for (let i = iFirst; i <= iLast; i++) {
+      const x = xForIdx(i);
+      const y = yForRight(PidChart._signedRelay(this._values[i]));
+      if (i === iFirst) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, yForRight(PidChart._signedRelay(this._values[i - 1])));
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
     leftSeries.forEach((entry) => {
       ctx.beginPath();
       ctx.lineWidth = 1.8;
@@ -632,9 +757,9 @@ class PidChart {
       }
       ctx.stroke();
     });
-    rightSeries.forEach((entry, idx) => {
+    rightSeries.forEach((entry) => {
       ctx.beginPath();
-      ctx.lineWidth = idx === rightSeries.length - 1 ? 1.2 : 1.8;
+      ctx.lineWidth = 1.8;
       ctx.strokeStyle = entry.color;
       for (let i = iFirst; i <= iLast; i++) {
         const x = xForIdx(i);
@@ -642,12 +767,7 @@ class PidChart {
         if (i === iFirst) {
           ctx.moveTo(x, y);
         } else {
-          if (idx === rightSeries.length - 1) {
-            ctx.lineTo(x, yForRight(entry.value(this._values[i - 1])));
-            ctx.lineTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
-          }
+          ctx.lineTo(x, y);
         }
       }
       ctx.stroke();
@@ -664,7 +784,7 @@ class PidChart {
       const signedOutput = PidChart._signedOutput(sample);
       const relayMode = sample.relay_on ? "cool" : "off";
       const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
-      const tip2 = `t:${sample.target_c.toFixed(1)} kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
+      const tip2 = `kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
       const tip3 = `drv:${signedOutput.toFixed(2)} win:${sample.window_step} on:${sample.on_steps} r:${relayMode}`;
 
       ctx.save();
@@ -709,74 +829,109 @@ class PidChart {
 
 // --- dashboard ---
 let lastHistorySeq = -1;
+let historyDropCount = 0; // packets missing from the stored JSONL, detected during replay
 let collecting = false;
 let syncCollectingUi = null;
 let collectionToggleInFlight = false;
 let pollRequestInFlight = false;
 let loadedHistoryBaseSeconds = 0;
 let lastUptimeSeconds = null;
+let uptimeAtHistoryLoad = null;
+// Set to true after each loadHistoryFromDevice so the first merged point gets a
+// session-boundary gap marker, clearly separating persisted history from live data.
+let sessionGapPending = false;
+// Last valid kp/ki/kd seen (from history or live status). Used to fill gaps
+// when the server status doesn't carry PID gains (UDP packet has no kp/ki/kd).
+let lastKnownPidGains = { kp: 0, ki: 0, kd: 0 };
 
 const loadHistoryFromDevice = async (sparklines, pidChart) => {
-  const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
+  const response = await fetch(`/history?points=${HISTORY_LOAD_POINTS}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
   const payload = (await response.json());
   const points = Array.isArray(payload.points) ? payload.points : [];
-  const tempValues = [];
-  const pidValues = [];
-  // Keyed by sensor index (1-based); extra sensor temps from history columns 7+
-  const extraTempValues = new Map();
 
-  points.forEach((point) => {
-    if (!Array.isArray(point) || point.length < 7) {
-      return;
-    }
-    tempValues.push(Number(point[1]));
-    pidValues.push({
-      target_c: Number(point[2]),
-      kp: 14.0,
-      ki: 0.35,
-      kd: 6.0,
-      output_percent: Number(point[3]),
-      window_step: Number(point[4]),
-      on_steps: Number(point[5]),
-      relay_on: Number(point[6]),
-    });
-    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2, etc.
-    for (let col = 7; col < point.length; col++) {
-      const sensorIdx = col - 6;
-      if (!extraTempValues.has(sensorIdx)) extraTempValues.set(sensorIdx, []);
-      const raw = point[col];
-      extraTempValues.get(sensorIdx).push(raw != null ? Number(raw) : NaN);
-    }
-    lastHistorySeq = Number(point[0]);
-  });
+  // Clear all charts first — we replay every record from scratch via push(),
+  // exactly as if each packet had just arrived from the device.
+  sparklines.forEach((sl) => sl.clear());
+  pidChart.clear();
+  lastHistorySeq = -1;
+  historyDropCount = 0;
 
   const sampleIntervalS =
     Number.isFinite(Number(payload.sample_interval_s)) && Number(payload.sample_interval_s) > 0
       ? Number(payload.sample_interval_s)
       : TREND_SAMPLE_INTERVAL_SECONDS;
-  loadedHistoryBaseSeconds = Math.max(0, tempValues.length - 1) * sampleIntervalS;
+  // A seq jump larger than 1.5× the normal interval means a real gap (reboot / no coverage).
+  const maxExpectedSeqGap = 1.5 * sampleIntervalS;
+  let prevSeq = null;
+  let pointCount = 0;
 
-  const primarySparkline = sparklines.get(0);
-  if (primarySparkline) {
-    primarySparkline.setValues(tempValues);
-    primarySparkline.setElapsedSeconds(loadedHistoryBaseSeconds);
-  }
-  for (const [sensorIdx, values] of extraTempValues) {
-    const sl = sparklines.get(sensorIdx);
-    if (sl) {
-      sl.setValues(values);
-      sl.setElapsedSeconds(loadedHistoryBaseSeconds);
+  points.forEach((point) => {
+    if (!Array.isArray(point) || point.length < 7) return;
+    const seq = Number(point[0]);
+
+    // Mark a gap on all sparklines if seq jumped unexpectedly.
+    if (prevSeq !== null) {
+      const seqDiff = seq - prevSeq;
+      if (seqDiff < 0 || seqDiff > maxExpectedSeqGap) {
+        sparklines.forEach((sl) => sl.markGapBeforeNext());
+        // Count the missing packets (backward jump counts as 1).
+        if (seqDiff > maxExpectedSeqGap) historyDropCount += Math.round(seqDiff - 1);
+        else historyDropCount += 1;
+      }
     }
-  }
-  pidChart.setValues(pidValues);
+    prevSeq = seq;
+    lastHistorySeq = seq;
+    pointCount++;
+
+    const temp   = Number(point[1]);
+    const target = Number(point[2]);
+
+    const primary = sparklines.get(0);
+    if (primary) {
+      primary.push(temp);
+      primary.pushTarget(target);
+    }
+
+    // Extra sensor temps: column 7 → sensor index 1, column 8 → sensor index 2.
+    for (let col = 7; col < point.length; col++) {
+      const sensorIdx = col - 6;
+      const sl = sparklines.get(sensorIdx);
+      if (sl) {
+        const raw = point[col];
+        sl.push(raw != null ? Number(raw) : NaN);
+      }
+    }
+
+    pidChart.push({
+      target_c: target,
+      kp: 14.0,
+      ki: 0.35,
+      kd: 6.0,
+      output_percent: Number(point[3]),
+      window_step:   Number(point[4]),
+      on_steps:      Number(point[5]),
+      relay_on:      Number(point[6]) !== 0,
+    });
+  });
+
+  loadedHistoryBaseSeconds = Math.max(0, pointCount - 1) * sampleIntervalS;
+  uptimeAtHistoryLoad = null; // reset; captured on next updateFromStatus call
+  sessionGapPending = true;  // gap marker inserted before first new live point
+
+  sparklines.forEach((sl) => sl.setElapsedSeconds(loadedHistoryBaseSeconds));
   pidChart.setElapsedSeconds(loadedHistoryBaseSeconds);
+
+  if (pidChart._values.length > 0) {
+    const last = pidChart._values[pidChart._values.length - 1];
+    if (Number.isFinite(last.kp)) lastKnownPidGains = { kp: last.kp, ki: last.ki, kd: last.kd };
+  }
 };
 
 const mergeHistoryFromDevice = async (sparklines, pidChart) => {
-  const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
+  const response = await fetch(`/history?points=${HISTORY_MERGE_POINTS}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -785,6 +940,7 @@ const mergeHistoryFromDevice = async (sparklines, pidChart) => {
   const primarySparkline = sparklines.get(0);
   if (!primarySparkline) return;
 
+  let prevSeq = lastHistorySeq;
   points.forEach((point) => {
     if (!Array.isArray(point) || point.length < 7) {
       return;
@@ -793,8 +949,11 @@ const mergeHistoryFromDevice = async (sparklines, pidChart) => {
     if (!Number.isFinite(seq) || seq <= lastHistorySeq) {
       return;
     }
+
+    prevSeq = seq;
     lastHistorySeq = seq;
     primarySparkline.push(Number(point[1]));
+    primarySparkline.pushTarget(Number(point[2]));
     // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2, etc.
     for (let col = 7; col < point.length; col++) {
       const sensorIdx = col - 6;
@@ -812,7 +971,7 @@ const mergeHistoryFromDevice = async (sparklines, pidChart) => {
       output_percent: Number(point[3]),
       window_step: Number(point[4]),
       on_steps: Number(point[5]),
-      relay_on: Number(point[6]),
+      relay_on: Number(point[6]) !== 0,
     });
   });
 };
@@ -838,7 +997,8 @@ const updateFromStatus = (
 
   lastUptimeSeconds = data.system.uptime_s;
   if (collecting) {
-    const totalElapsed = loadedHistoryBaseSeconds + data.system.uptime_s;
+    if (uptimeAtHistoryLoad === null) uptimeAtHistoryLoad = data.system.uptime_s;
+    const totalElapsed = loadedHistoryBaseSeconds + (data.system.uptime_s - uptimeAtHistoryLoad);
     sparklines.forEach((sparkline) => {
       sparkline.setElapsedSeconds(totalElapsed);
     });
@@ -848,9 +1008,18 @@ const updateFromStatus = (
   }
 
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
-  setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
+  setText("updated", new Date().toLocaleTimeString());
   if (data.system && data.system.uptime_s !== null) {
-    setText("uptime", `Uptime: ${formatUptime(data.system.uptime_s)}`);
+    setText("uptime", formatUptime(data.system.uptime_s));
+  }
+  const dropped = (data.system.packets_dropped ?? 0) + historyDropCount;
+  const seqEl = document.getElementById("seq-info");
+  if (seqEl) {
+    const dropLabel = historyDropCount > 0
+      ? `drops: ${data.system.packets_dropped ?? 0} live + ${historyDropCount} stored`
+      : `drops: ${data.system.packets_dropped ?? 0}`;
+    seqEl.textContent = `seq: ${data.system.seq ?? "--"}  ${dropLabel}`;
+    seqEl.style.color = dropped > 0 ? "var(--warn)" : "";
   }
   ensureTemperatureCharts(data.sensors || []);
 
@@ -858,6 +1027,12 @@ const updateFromStatus = (
   if (primarySensor) {
     setText("temp", formatTemp(primarySensor.temperature_c, "C"));
     setText("temp-secondary", formatTemp(primarySensor.temperature_f, "F"));
+  }
+
+  // First live push after a history load: mark a session boundary on all sparklines.
+  if (collecting && sessionGapPending) {
+    sessionGapPending = false;
+    sparklines.forEach((sl) => sl.markGapBeforeNext());
   }
 
   if (Array.isArray(data.sensors)) {
@@ -869,6 +1044,7 @@ const updateFromStatus = (
         const sensorChart = sparklines.get(sensor.index);
         if (sensorChart) {
           sensorChart.push(sensor.temperature_c);
+          if (sensor.index === 0) sensorChart.pushTarget(data.pid.target_c);
         }
       }
     });
@@ -887,11 +1063,14 @@ const updateFromStatus = (
   byId("relay").style.color = relayState === "Deactivated" ? "#ff6e6e" : "";
 
   if (collecting) {
+    if (Number.isFinite(data.pid.kp)) {
+      lastKnownPidGains = { kp: data.pid.kp, ki: data.pid.ki, kd: data.pid.kd };
+    }
     const sample = {
       target_c: data.pid.target_c,
-      kp: data.pid.kp,
-      ki: data.pid.ki,
-      kd: data.pid.kd,
+      kp: lastKnownPidGains.kp,
+      ki: lastKnownPidGains.ki,
+      kd: lastKnownPidGains.kd,
       output_percent: data.pid.output_percent,
       window_step: data.pid.window_step,
       on_steps: data.pid.on_steps,
@@ -904,6 +1083,17 @@ const updateFromStatus = (
 
   setText("ip", data.system.ip || "--");
   updateNtpPill(data.system.ntp.synced);
+
+  // Device IP stat: make it a clickable link when a real IP is available.
+  const deviceIp = data.system.ip || "";
+  const ipValid = deviceIp !== "" && !deviceIp.startsWith("Error") && deviceIp !== "0.0.0.0";
+  const devicePort = data.system.device_http_port ?? 80;
+  const ipEl = byId("ip");
+  if (ipValid) {
+    ipEl.href = devicePort === 80 ? `http://${deviceIp}/` : `http://${deviceIp}:${devicePort}/`;
+  } else {
+    ipEl.removeAttribute("href");
+  }
 };
 
 const loop = async (
@@ -921,6 +1111,12 @@ const loop = async (
 
   pollRequestInFlight = true;
   try {
+    // Merge catch-up history BEFORE fetching live status so that any points
+    // between the last downsampled history point and now are appended in
+    // chronological order, before the gap marker and live status push.
+    if (collecting) {
+      await mergeHistoryFromDevice(sparklines, primaryPidChart);
+    }
     const response = await fetch("/status", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -935,9 +1131,6 @@ const loop = async (
       setPidProbeLabel,
       ensureTemperatureCharts,
     );
-    if (collecting) {
-      await mergeHistoryFromDevice(sparklines, primaryPidChart);
-    }
   } catch (error) {
     const msg = error instanceof TypeError ? "No link \u2014 retrying\u2026" : `Update failed: ${String(error)}`;
     setText("updated", msg);
@@ -973,6 +1166,26 @@ const start = () => {
   pidCard.dataset.sensorIndex = "0";
   pidCard.dataset.cardType = "pid";
 
+  const buildTempLegend = (card, { showTarget = true, showGap = true } = {}) => {
+    let el = card.querySelector(".chart-legend");
+    if (!el) { el = document.createElement("div"); el.className = "chart-legend"; card.appendChild(el); }
+    el.innerHTML =
+      `<span class="legend-item"><span class="legend-swatch" style="background:linear-gradient(90deg,#40c4ff,#40d990)"></span>Temperature</span>` +
+      (showTarget ? `<span class="legend-item"><span class="legend-swatch" style="background:#f7d774"></span>Target \u00b0C</span>` : "") +
+      (showGap ? `<span class="legend-item"><span class="legend-swatch" style="background:rgba(255,80,80,0.75)"></span>Missing data</span>` : "");
+  };
+
+  const buildPidLegend = (card) => {
+    let el = card.querySelector(".chart-legend");
+    if (!el) { el = document.createElement("div"); el.className = "chart-legend"; card.appendChild(el); }
+    el.innerHTML = [
+      ["#40c4ff", "Kp"], ["#ffd740", "Ki"], ["#e040fb", "Kd"],
+      ["#ff6d00", "Output%"], ["#69f0ae", "Relay"],
+    ].map(([color, label]) =>
+      `<span class="legend-item"><span class="legend-swatch" style="background:${color}"></span>${label}</span>`
+    ).join("");
+  };
+
   sparklines.set(0, new Sparkline(primaryCanvas));
   pidCharts.set(0, new PidChart(pidCanvas));
 
@@ -986,6 +1199,8 @@ const start = () => {
   if (primaryPidLabel) {
     pidLabelEls.set(0, primaryPidLabel);
   }
+  buildTempLegend(primaryCard);
+  buildPidLegend(pidCard);
 
   const setControlProbeIndex = (nextIndex) => {
     if (!Number.isFinite(nextIndex)) {
@@ -1052,24 +1267,31 @@ const start = () => {
   const hoverRatioForClientX = (canvas, clientX) => {
     const rect = canvas.getBoundingClientRect();
     const canvasX = ((clientX - rect.left) / rect.width) * canvas.width;
-    const { axisPadLeft, sparklinePadRight } = CHART_LAYOUT;
-    const plotWidth = Math.max(1, canvas.width - axisPadLeft - sparklinePadRight);
+    const { axisPadLeft, sparklinePadRight, pidPadRight } = CHART_LAYOUT;
+    const isPid = canvas.closest("article")?.dataset.cardType === "pid";
+    const rightPad = isPid ? pidPadRight : sparklinePadRight;
+    const plotWidth = Math.max(1, canvas.width - axisPadLeft - rightPad);
     return Math.max(0, Math.min(1, (canvasX - axisPadLeft) / plotWidth));
   };
 
-  // Set up hover synchronization between primary temperature chart and PID chart
-  primaryChart.canvas.addEventListener("mousemove", (event) => {
-    primaryPidChart.setHoverRatio(hoverRatioForClientX(primaryChart.canvas, event.clientX));
+  // Broadcast hover ratio to all charts for synchronized crosshair tracking.
+  const broadcastHoverRatio = (ratio) => {
+    sparklines.forEach((s) => s.setHoverRatio(ratio));
+    pidCharts.forEach((c) => c.setHoverRatio(ratio));
+  };
+  // Keep last ratio so the cursor stays alive when the mouse crosses legend/header
+  // gaps between canvases (internal canvas listeners are gone so no race possible).
+  let lastHoverRatio = null;
+  section.addEventListener("mousemove", (event) => {
+    const canvas = event.target?.closest("canvas.chart");
+    if (canvas instanceof HTMLCanvasElement) {
+      lastHoverRatio = hoverRatioForClientX(canvas, event.clientX);
+      broadcastHoverRatio(lastHoverRatio);
+    } else if (lastHoverRatio !== null) {
+      broadcastHoverRatio(lastHoverRatio);
+    }
   });
-  primaryChart.canvas.addEventListener("mouseleave", () => {
-    primaryPidChart.setHoverRatio(null);
-  });
-  pidCanvas.addEventListener("mousemove", (event) => {
-    primaryChart.setHoverRatio(hoverRatioForClientX(pidCanvas, event.clientX));
-  });
-  pidCanvas.addEventListener("mouseleave", () => {
-    primaryChart.setHoverRatio(null);
-  });
+  section.addEventListener("mouseleave", () => { lastHoverRatio = null; broadcastHoverRatio(null); });
 
   const applyZoom = (pivotRatio, factor) => {
     const span = zoomEnd - zoomStart;
@@ -1151,11 +1373,12 @@ const start = () => {
     tempCanvas.width = CHART_CANVAS_WIDTH;
     tempCanvas.height = CHART_CANVAS_HEIGHT;
 
-    const sparkline = new Sparkline(tempCanvas);
+    const sparkline = new Sparkline(tempCanvas, { showTarget: false });
     sparklines.set(index, sparkline);
     sparkline.setElapsedSeconds(loadedHistoryBaseSeconds);
 
     section.appendChild(newTempCard);
+    buildTempLegend(newTempCard, { showTarget: false, showGap: false });
     return true;
   };
 
@@ -1184,6 +1407,7 @@ const start = () => {
     pidCharts.set(index, chart);
 
     section.appendChild(newPidCard);
+    buildPidLegend(newPidCard);
     return true;
   };
 
@@ -1245,8 +1469,8 @@ const start = () => {
       setTargetFeedback("Enter a valid number", "error");
       return;
     }
-    if (parsed < -20 || parsed > 25) {
-      setTargetFeedback("Target must be between -20 and 25 C", "error");
+    if (parsed < -20 || parsed > 100) {
+      setTargetFeedback("Target must be between -20 and 100 C", "error");
       return;
     }
 
@@ -1307,7 +1531,25 @@ const start = () => {
       setPidProbeLabel,
       ensureTemperatureCharts,
     );
-  }, 5000);
+  }, 1000);
+
+  // SSE: update immediately when the server receives a UDP packet.
+  // Falls back to the 1-second interval if /events is unavailable (e.g. on the ESP32).
+  const evtSrc = new EventSource("/events");
+  let sseOpened = false;
+  evtSrc.onopen = () => { sseOpened = true; };
+  evtSrc.onerror = () => { if (!sseOpened) evtSrc.close(); };
+  evtSrc.addEventListener("pkt", () => {
+    void loop(
+      sparklines,
+      pidCharts,
+      primaryPidChart,
+      setControlProbeIndex,
+      setTempProbeLabel,
+      setPidProbeLabel,
+      ensureTemperatureCharts,
+    );
+  });
 
   const menuBtn = byId("menu-btn");
   const menuDropdown = byId("menu-dropdown");
@@ -1319,6 +1561,8 @@ const start = () => {
     collecting = value;
     startDataBtn.disabled = value;
     stopDataBtn.disabled = !value;
+    const dot = document.getElementById("collect-dot");
+    if (dot) dot.classList.toggle("active", value);
   };
 
   syncCollectingUi = setCollecting;
@@ -1381,12 +1625,16 @@ const start = () => {
   });
 
   clearDataBtn.addEventListener("click", () => {
+    if (!confirm("Clear all history? This cannot be undone.")) { return; }
     clearHistoryOnDevice()
       .then(() => {
         sparklines.forEach((sparkline) => sparkline.clear());
         pidCharts.forEach((chart) => chart.clear());
         lastUptimeSeconds = null;
         loadedHistoryBaseSeconds = 0;
+        uptimeAtHistoryLoad = null;
+        lastHistorySeq = -1;
+        historyDropCount = 0;
       })
       .catch((error) => {
         setText("updated", `Clear failed: ${String(error)}`);

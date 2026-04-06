@@ -17,8 +17,9 @@ use crate::{PID_KD, PID_KI, PID_KP, device_hostname};
 fn ntp_peer_snapshots() -> heapless::Vec<NtpPeerSnapshot, NTP_MAX_TRACKED_PEERS> {
     status::ntp_peers_snapshot()
 }
-const JSON_STATUS_CAPACITY: usize = 3072;
+const JSON_STATUS_CAPACITY: usize = 3200;
 const TEXT_STATUS_CAPACITY: usize = 192;
+#[cfg(feature = "prometheus")]
 const PROM_STATUS_CAPACITY: usize = 8192;
 const NTP_MAX_TRACKED_PEERS: usize = shared::NTP_MAX_CONFIG_SERVERS + 1;
 
@@ -445,7 +446,22 @@ pub fn json() -> String {
     }
     out.push_str("]\n");
     out.push_str("    }\n");
-    out.push_str("  }\n");
+    out.push_str("  },\n");
+    let (sent, failed) = super::network::udp_telemetry_stats();
+    out.push_str("  \"telemetry\": {\n");
+    let _ = write!(out, "    \"packets_sent\": {},\n", sent);
+    let _ = write!(out, "    \"packets_failed\": {},\n", failed);
+    out.push_str("    \"server_ip\": ");
+    if let Some(octets) = super::network::udp_discovered_server_ip_octets() {
+        let _ = write!(
+            out,
+            "\"{}.{}.{}.{}\"",
+            octets[0], octets[1], octets[2], octets[3]
+        );
+    } else {
+        out.push_str("null");
+    }
+    out.push_str("\n  }\n");
     out.push_str("}\n");
     out
 }
@@ -574,6 +590,7 @@ pub fn text() -> String {
 }
 
 /// Serialize device state as Prometheus metrics.
+#[cfg(feature = "prometheus")]
 #[allow(
     clippy::large_stack_frames,
     reason = "Prometheus serialization accumulates many labels and temporary values"

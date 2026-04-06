@@ -27,7 +27,10 @@ export type StatusPayload = {
   };
   system: {
     ip: string;
+    device_http_port: number;
     collecting?: boolean;
+    seq: number;
+    packets_dropped: number;
     ntp: {
       synced: boolean;
       time: string | null;
@@ -59,7 +62,7 @@ export type HistoryPayload = {
   points: number[][];
 };
 
-export const HISTORY_FETCH_POINTS = 400;
+export const HISTORY_FETCH_POINTS = 2000;
 
 export const submitTargetTemperature = async (tempC: number): Promise<void> => {
   const response = await fetch("/temperature", {

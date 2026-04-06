@@ -162,7 +162,7 @@ curl -X POST http://brewster.local/temperature \
   -d '{"temperature_c": 21.5}'
 ```
 
-Accepted temperature range is `-20.0..=25.0` degrees C.
+Accepted temperature range is `-20.0..=100.0` degrees C.
 
 To start or stop data collection:
 
@@ -321,16 +321,62 @@ In new terminals, load the ESP environment before running cargo commands:
 
 ## Build, Run, And Flash
 
+### Using `build.sh` (recommended)
+
+`build.sh` builds both the firmware and the LAN server in one step. The server
+is always built in release mode. The firmware is built in **debug** mode by
+default; pass `--release` to build it optimised.
+
+```sh
+# Build firmware (debug) + server (release)
+./build.sh
+
+# Build firmware in release mode
+./build.sh --release
+
+# Flash after building
+./build.sh --flash
+./build.sh --release --flash
+
+# Start the server after building
+./build.sh --run-server
+
+# Full workflow: release firmware, flash, and start the server
+./build.sh --release --flash --run-server
+```
+
+Any unrecognised flags are forwarded to `cargo build` for the firmware.
+
+### Debug vs release
+
+| | Firmware | Server |
+| --- | --- | --- |
+| Default (`./build.sh`) | debug | release |
+| With `--release` | release | release |
+| Binary location (debug) | `target/xtensa-esp32s3-none-elf/debug/brewster` | `server/target/aarch64-apple-darwin/release/brewster-server` |
+| Binary location (release) | `target/xtensa-esp32s3-none-elf/release/brewster` | `server/target/aarch64-apple-darwin/release/brewster-server` |
+
+Debug firmware builds are faster to compile and include backtraces. Release
+firmware is significantly smaller and faster — use it for production flashing.
+
+### Manual firmware commands
+
 Check the firmware:
 
 ```sh
 . ~/export-esp.sh && cargo check
 ```
 
-Build the firmware:
+Build the firmware (debug):
 
 ```sh
 . ~/export-esp.sh && cargo build
+```
+
+Build the firmware (release):
+
+```sh
+. ~/export-esp.sh && cargo build --release
 ```
 
 Flash and open the serial monitor:

@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use critical_section::Mutex;
 use embedded_storage::nor_flash::NorFlash;
 use embedded_storage::{ReadStorage, Storage};
@@ -19,11 +19,20 @@ use super::error::StorageError as PersistError;
 pub const TEMP_PROBE_NAME_MAX_LEN: usize = 32;
 
 const TARGET_TEMP_MIN_CENTI: i32 = -2_000;
-const TARGET_TEMP_MAX_CENTI: i32 = 2_500;
+const TARGET_TEMP_MAX_CENTI: i32 = 10_000;
 const TARGET_STORE_MAGIC: [u8; 4] = *b"BRWT";
 const TARGET_STORE_VERSION: u8 = 1;
 const TARGET_STORE_SIZE: usize = 9;
 const TARGET_PARTITION_LABEL: &str = "cfg";
+
+// Feature-flags record, stored at a fixed offset inside the cfg partition.
+const FLAGS_STORE_OFFSET_IN_PARTITION: u32 = 0x200;
+const FLAGS_STORE_MAGIC: [u8; 4] = *b"BRWF";
+const FLAGS_STORE_VERSION: u8 = 1;
+const FLAGS_STORE_SIZE: usize = 9;
+const FLAGS_HTTP_BIT: u8 = 0b0000_0001;
+const FLAGS_PROMETHEUS_BIT: u8 = 0b0000_0010;
+const FLAGS_COLLECTING_BIT: u8 = 0b0000_0100;
 const HISTORY_RECORD_SIZE: u32 = 16;
 /// Number of extra (non-control) sensor temperatures stored per record.
 const HISTORY_EXTRA_SENSOR_COUNT: usize = 3;
@@ -75,6 +84,12 @@ static HISTORY_WRITE_INDEX: AtomicU32 = AtomicU32::new(0);
 static HISTORY_NEXT_SEQ: AtomicU32 = AtomicU32::new(0);
 static HISTORY_COUNT: AtomicU32 = AtomicU32::new(0);
 static HISTORY_LAST_PERSIST_UPTIME_S: AtomicU32 = AtomicU32::new(0);
+// Runtime feature flags (flash-backed, but read into atomics at boot).
+// Default: both on — matches first-boot behaviour when no record exists.
+static FEATURE_HTTP_ENABLED: AtomicBool = AtomicBool::new(true);
+static FEATURE_PROMETHEUS_ENABLED: AtomicBool = AtomicBool::new(true);
+// Collection state (flash-backed). Default: false — devices start idle.
+static COLLECTION_ENABLED_PERSISTED: AtomicBool = AtomicBool::new(false);
 // RAM-only probe name (not flash-backed).
 static TEMP_PROBE_NAME: Mutex<RefCell<heapless::String<TEMP_PROBE_NAME_MAX_LEN>>> =
     Mutex::new(RefCell::new(heapless::String::new()));
@@ -391,6 +406,9 @@ pub fn init_persistent_target(flash: FLASH<'static>) -> Option<f32> {
 
     history_init(&mut storage, store_offset, store_len);
 
+    // Load feature flags from the cfg partition.
+    flags_init(&mut storage, store_offset, store_len);
+
     critical_section::with(|cs| {
         FLASH_STORAGE.borrow_ref_mut(cs).replace(storage);
     });
@@ -402,6 +420,93 @@ pub fn get_target_temp_c() -> f32 {
     TARGET_TEMP_CENTI.load(Ordering::Relaxed) as f32 / 100.0
 }
 
+/// Returns `true` if the embedded HTTP server should be started.
+pub fn feature_http_enabled() -> bool {
+    FEATURE_HTTP_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Returns `true` if the Prometheus `/metrics` endpoint should be served.
+pub fn feature_prometheus_enabled() -> bool {
+    FEATURE_PROMETHEUS_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Persist and apply a new feature-flags configuration.
+pub fn set_features_persistent(http: bool, prometheus: bool) -> Result<(), PersistError> {
+    FEATURE_HTTP_ENABLED.store(http, Ordering::Relaxed);
+    FEATURE_PROMETHEUS_ENABLED.store(prometheus, Ordering::Relaxed);
+    let collecting = COLLECTION_ENABLED_PERSISTED.load(Ordering::Relaxed);
+    persist_flags(http, prometheus, collecting)
+}
+
+/// Persist the collection state so it survives a reboot.
+pub fn set_collection_enabled_persistent(enabled: bool) -> Result<(), PersistError> {
+    COLLECTION_ENABLED_PERSISTED.store(enabled, Ordering::Relaxed);
+    let http = FEATURE_HTTP_ENABLED.load(Ordering::Relaxed);
+    let prometheus = FEATURE_PROMETHEUS_ENABLED.load(Ordering::Relaxed);
+    persist_flags(http, prometheus, enabled)
+}
+
+/// Returns the persisted (boot-time) collection state.
+pub fn collection_enabled_persisted() -> bool {
+    COLLECTION_ENABLED_PERSISTED.load(Ordering::Relaxed)
+}
+
+fn flags_offset(partition_offset: u32) -> u32 {
+    partition_offset + FLAGS_STORE_OFFSET_IN_PARTITION
+}
+
+fn flags_init(storage: &mut FlashStorage<'static>, partition_offset: u32, partition_len: u32) {
+    let required = FLAGS_STORE_OFFSET_IN_PARTITION + FLAGS_STORE_SIZE as u32;
+    if partition_len < required {
+        // Partition too small — keep defaults (both features on).
+        return;
+    }
+    let offset = flags_offset(partition_offset);
+    let mut raw = [0u8; FLAGS_STORE_SIZE];
+    if storage.read(offset, &mut raw).is_err() {
+        return;
+    }
+    if raw[0..4] != FLAGS_STORE_MAGIC || raw[4] != FLAGS_STORE_VERSION {
+        // No valid record — keep defaults (both on).
+        return;
+    }
+    let flags = raw[5];
+    FEATURE_HTTP_ENABLED.store(flags & FLAGS_HTTP_BIT != 0, Ordering::Relaxed);
+    FEATURE_PROMETHEUS_ENABLED.store(flags & FLAGS_PROMETHEUS_BIT != 0, Ordering::Relaxed);
+    COLLECTION_ENABLED_PERSISTED.store(flags & FLAGS_COLLECTING_BIT != 0, Ordering::Relaxed);
+}
+
+fn persist_flags(http: bool, prometheus: bool, collecting: bool) -> Result<(), PersistError> {
+    let store_offset = TARGET_STORE_OFFSET.load(Ordering::Relaxed);
+    let store_len = TARGET_STORE_PARTITION_LEN.load(Ordering::Relaxed);
+    let required = FLAGS_STORE_OFFSET_IN_PARTITION + FLAGS_STORE_SIZE as u32;
+    if store_len == 0 {
+        return Err(PersistError::MissingPartition);
+    }
+    if store_len < required {
+        return Err(PersistError::PartitionTooSmall);
+    }
+
+    let offset = flags_offset(store_offset);
+    let mut flags: u8 = 0;
+    if http { flags |= FLAGS_HTTP_BIT; }
+    if prometheus { flags |= FLAGS_PROMETHEUS_BIT; }
+    if collecting { flags |= FLAGS_COLLECTING_BIT; }
+
+    let mut raw = [0xFFu8; FLAGS_STORE_SIZE];
+    raw[0..4].copy_from_slice(&FLAGS_STORE_MAGIC);
+    raw[4] = FLAGS_STORE_VERSION;
+    raw[5] = flags;
+
+    critical_section::with(|cs| {
+        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
+        let Some(storage) = guard.as_mut() else {
+            return Err(PersistError::NotInitialized);
+        };
+        Storage::write(storage, offset, &raw)?;
+        Ok(())
+    })
+}
 pub fn set_target_temp_c_persistent(target_c: f32) -> Result<(), PersistError> {
     let scaled = target_c * 100.0;
     let target_centi = if scaled >= 0.0 {

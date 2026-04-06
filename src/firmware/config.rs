@@ -67,3 +67,24 @@ pub fn temp_probe_name() -> &'static str {
         _ => TEMP_PROBE_NAME_DEFAULT,
     }
 }
+
+// ── UDP telemetry server ──────────────────────────────────────────────────────
+
+/// IP address of the LAN server that receives UDP telemetry.
+/// Set `UDP_SERVER_IP = "x.x.x.x"` in `config.local.toml` to enable.
+pub const UDP_SERVER_IP_CONFIG: Option<&str> = option_env!("UDP_SERVER_IP");
+
+/// UDP port the LAN server listens on.  Defaults to 47890 if not set.
+pub const UDP_SERVER_PORT_CONFIG: Option<&str> = option_env!("UDP_SERVER_PORT");
+
+pub const UDP_SERVER_PORT_DEFAULT: u16 = 47890;
+
+pub fn udp_server_port() -> u16 {
+    match UDP_SERVER_PORT_CONFIG
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|&p| p > 1024)
+    {
+        Some(p) => p,
+        None => UDP_SERVER_PORT_DEFAULT,
+    }
+}
