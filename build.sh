@@ -3,6 +3,7 @@
 # Pass --flash         to also flash the firmware after building.
 # Pass --monitor       to open espflash serial monitor after flashing (or standalone).
 # Pass --run-server    to start the server after building.
+# Pass --release       to build firmware in release mode (optimised, smaller binary).
 # Pass --no-http       to disable the embedded HTTP server feature.
 # Pass --no-prometheus to disable the Prometheus /metrics endpoint.
 set -euo pipefail
@@ -10,6 +11,7 @@ set -euo pipefail
 FLASH=0
 MONITOR=0
 RUN_SERVER=0
+RELEASE=0
 NO_HTTP=0
 NO_PROMETHEUS=0
 ARGS=()
@@ -18,6 +20,7 @@ for arg in "$@"; do
     --flash)         FLASH=1 ;;
     --monitor)       MONITOR=1 ;;
     --run-server)    RUN_SERVER=1 ;;
+    --release)       RELEASE=1 ;;
     --no-http)       NO_HTTP=1 ;;
     --no-prometheus) NO_PROMETHEUS=1 ;;
     *)               ARGS+=("$arg") ;;
@@ -41,11 +44,20 @@ echo "==> firmware: sourcing ESP toolchain"
 # shellcheck source=/dev/null
 . ~/export-esp.sh
 
+PROFILE_DIR="debug"
+RELEASE_FLAG=()
+if [[ $RELEASE -eq 1 ]]; then
+  PROFILE_DIR="release"
+  RELEASE_FLAG=(--release)
+fi
+FIRMWARE_BIN="$SCRIPT_DIR/target/xtensa-esp32s3-none-elf/$PROFILE_DIR/brewster"
+
 echo "==> firmware: cargo build"
 cargo build \
   --target xtensa-esp32s3-none-elf \
   -Zbuild-std=core,alloc \
   --manifest-path "$SCRIPT_DIR/Cargo.toml" \
+  "${RELEASE_FLAG[@]+"${RELEASE_FLAG[@]}"}" \
   "${FEATURE_FLAGS[@]+"${FEATURE_FLAGS[@]}"}" \
   "$@"
 
@@ -54,7 +66,7 @@ echo "==> server: cargo build"
 (cd "$SCRIPT_DIR/server" && cargo build --release)
 
 echo "==> done"
-echo "    firmware: target/xtensa-esp32s3-none-elf/debug/brewster"
+echo "    firmware: $FIRMWARE_BIN"
 echo "    server:   server/target/aarch64-apple-darwin/release/brewster-server"
 
 if [[ $FLASH -eq 1 && $MONITOR -eq 1 ]]; then
@@ -65,13 +77,13 @@ if [[ $FLASH -eq 1 && $MONITOR -eq 1 ]]; then
     --no-stub \
     --partition-table "$SCRIPT_DIR/partitions.csv" \
     --monitor \
-    "$SCRIPT_DIR/target/xtensa-esp32s3-none-elf/debug/brewster"
+    "$FIRMWARE_BIN"
 elif [[ $FLASH -eq 1 ]]; then
   echo "==> firmware: flashing"
   espflash flash \
     --no-stub \
     --partition-table "$SCRIPT_DIR/partitions.csv" \
-    "$SCRIPT_DIR/target/xtensa-esp32s3-none-elf/debug/brewster"
+    "$FIRMWARE_BIN"
 fi
 
 if [[ $MONITOR -eq 1 ]]; then
