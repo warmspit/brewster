@@ -137,7 +137,7 @@ Cross-compiling from macOS to Linux or Windows requires the extra steps below.
 
 ### Prerequisites
 
-- Rust stable toolchain: `rustup toolchain install stable`
+* Rust stable toolchain: `rustup toolchain install stable`
 
 > **Note:** `server/.cargo/config.toml` sets the default build target to
 > `aarch64-apple-darwin`.  Pass `--target <triple>` explicitly when building
