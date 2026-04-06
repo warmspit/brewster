@@ -39,9 +39,17 @@ const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChar
       ? Number(payload.sample_interval_s)
       : TREND_SAMPLE_INTERVAL_SECONDS;
 
+  let firstTsS: number | null = null;
+  let lastTsS: number | null = null;
+
   points.forEach((point) => {
     if (!Array.isArray(point) || point.length < 7) {
       return;
+    }
+    const tsS = Number(point[12]);
+    if (Number.isFinite(tsS) && tsS > 0) {
+      if (firstTsS === null) firstTsS = tsS;
+      lastTsS = tsS;
     }
     const idx = tempValues.length;
     // col 13: gap_before flag set by the server based on raw record timestamps.
@@ -71,7 +79,12 @@ const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChar
     lastHistorySeq = Number(point[0]);
   });
 
-  loadedHistoryBaseSeconds = Math.max(0, tempValues.length - 1) * sampleIntervalS;
+  // Use actual wall-clock span (col 12 = t_s) so the x-axis does not shift when
+  // live points are appended. Fall back to tempValues.length × sampleIntervalS.
+  loadedHistoryBaseSeconds =
+    firstTsS !== null && lastTsS !== null && lastTsS > firstTsS
+      ? lastTsS - firstTsS
+      : Math.max(0, tempValues.length - 1) * sampleIntervalS;
   uptimeAtHistoryLoad = null; // reset; will be captured on next updateFromStatus call
   sessionGapPending = true;  // next merge point starts a new visual segment
 

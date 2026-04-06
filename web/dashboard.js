@@ -913,10 +913,17 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
       ? Number(payload.sample_interval_s)
       : TREND_SAMPLE_INTERVAL_SECONDS;
   let pointCount = 0;
+  let firstTsS = null;
+  let lastTsS  = null;
 
   points.forEach((point) => {
     if (!Array.isArray(point) || point.length < 7) return;
     const seq = Number(point[0]);
+    const tsS = Number(point[12]);
+    if (Number.isFinite(tsS) && tsS > 0) {
+      if (firstTsS === null) firstTsS = tsS;
+      lastTsS = tsS;
+    }
 
     // col 13: gap_before — server-annotated from raw record receive timestamps.
     // More reliable than seq-diff heuristics; accurate regardless of downsampling ratio.
@@ -959,7 +966,13 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
     });
   });
 
-  loadedHistoryBaseSeconds = Math.max(0, pointCount - 1) * sampleIntervalS;
+  // Compute elapsed span from actual wall-clock timestamps (col 12 = t_s) so the
+  // x-axis does not shift when live points are appended after a history load.
+  // Fall back to pointCount × sampleIntervalS if t_s is unavailable.
+  loadedHistoryBaseSeconds =
+    firstTsS !== null && lastTsS !== null && lastTsS > firstTsS
+      ? lastTsS - firstTsS
+      : Math.max(0, pointCount - 1) * sampleIntervalS;
   uptimeAtHistoryLoad = null; // reset; captured on next updateFromStatus call
   sessionGapPending = true;  // gap marker inserted before first new live point
 
