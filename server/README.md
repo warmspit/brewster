@@ -131,14 +131,112 @@ All configuration is via environment variables. No config file is required.
 
 ## Building
 
-The server is a standard Rust binary targeting the host machine (no
-cross-compilation required).
+The server is a standard Rust binary that compiles for the **host machine** —
+no embedded toolchain or cross-compilation is needed for native builds.
+Cross-compiling from macOS to Linux or Windows requires the extra steps below.
 
 ### Prerequisites
 
-- Rust stable toolchain (`rustup toolchain install stable`)
+- Rust stable toolchain: `rustup toolchain install stable`
 
-### Using `build.sh` (recommended)
+> **Note:** `server/.cargo/config.toml` sets the default build target to
+> `aarch64-apple-darwin`.  Pass `--target <triple>` explicitly when building
+> for any other platform.
+
+---
+
+### macOS (native — Apple Silicon)
+
+```sh
+cd server
+cargo build --release
+# binary: target/aarch64-apple-darwin/release/brewster-server
+```
+
+### macOS (native — Intel)
+
+```sh
+cd server
+rustup target add x86_64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+# binary: target/x86_64-apple-darwin/release/brewster-server
+```
+
+---
+
+### Linux (native, on a Linux host)
+
+```sh
+cd server
+cargo build --release --target x86_64-unknown-linux-gnu
+# binary: target/x86_64-unknown-linux-gnu/release/brewster-server
+```
+
+For ARM Linux (e.g. Raspberry Pi running a 64-bit OS):
+
+```sh
+rustup target add aarch64-unknown-linux-gnu
+# Install a cross-linker if one is not already present:
+#   macOS: brew install messense/macos-cross-toolchains/aarch64-unknown-linux-gnu
+#   Ubuntu: sudo apt install gcc-aarch64-linux-gnu
+cargo build --release --target aarch64-unknown-linux-gnu
+# binary: target/aarch64-unknown-linux-gnu/release/brewster-server
+```
+
+---
+
+### Linux (cross-compiled from macOS using `cargo-zigbuild`)
+
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) uses the Zig
+compiler as a drop-in cross-linker, avoiding the need to install system
+cross-toolchains.
+
+```sh
+# One-time setup
+cargo install cargo-zigbuild
+brew install zig
+rustup target add x86_64-unknown-linux-gnu
+rustup target add aarch64-unknown-linux-gnu
+
+# x86-64 Linux
+cd server
+cargo zigbuild --release --target x86_64-unknown-linux-gnu
+# binary: target/x86_64-unknown-linux-gnu/release/brewster-server
+
+# ARM64 Linux (Raspberry Pi etc.)
+cargo zigbuild --release --target aarch64-unknown-linux-gnu
+# binary: target/aarch64-unknown-linux-gnu/release/brewster-server
+```
+
+---
+
+### Windows (cross-compiled from macOS)
+
+```sh
+# One-time setup
+rustup target add x86_64-pc-windows-gnu
+brew install mingw-w64          # provides the Windows cross-linker
+
+cd server
+cargo build --release --target x86_64-pc-windows-gnu
+# binary: target/x86_64-pc-windows-gnu/release/brewster-server.exe
+```
+
+For a native Windows build (on a Windows host with Rust for Windows installed):
+
+```powershell
+cd server
+# Remove or rename .cargo\config.toml first — it hard-codes aarch64-apple-darwin.
+cargo build --release --target x86_64-pc-windows-msvc
+# binary: target\x86_64-pc-windows-msvc\release\brewster-server.exe
+```
+
+> The `mDNS` broadcast feature uses the `socket2` crate which works on all
+> three platforms.  No Windows-specific patches are needed.
+
+---
+
+### Using `build.sh` (macOS/Linux, recommended for combined firmware + server)
 
 From the repository root, `build.sh` builds both the firmware and the server
 together and supports optional flash + run flags:
@@ -154,16 +252,9 @@ together and supports optional flash + run flags:
 ./build.sh --flash --run-server
 ```
 
-The server binary is at `server/target/aarch64-apple-darwin/release/brewster-server`.
+---
 
-### Build (server only)
-
-```sh
-cd server
-cargo build --release
-```
-
-### Run (server only)
+### Run
 
 ```sh
 # Defaults — UDP :47890, HTTP :8080, 60-day retention, web assets at ../web
@@ -174,6 +265,13 @@ UDP_PORT=47890 HTTP_PORT=9090 RETENTION_HOURS=168 WEB_DIR=/var/www/brewster \
   DATA_FILE=/var/lib/brewster/data.json cargo run --release
 ```
 
+On Windows (PowerShell):
+
+```powershell
+$env:UDP_PORT="47890"; $env:HTTP_PORT="8080"; $env:WEB_DIR="..\web"
+.\target\x86_64-pc-windows-msvc\release\brewster-server.exe
+```
+
 ### Check / lint
 
 ```sh
@@ -181,11 +279,6 @@ cd server
 cargo check
 cargo clippy
 ```
-
-> **Note:** `server/.cargo/config.toml` overrides the workspace default target
-> to `aarch64-apple-darwin` (or your host triple) so that running `cargo`
-> inside `server/` does not inherit the `xtensa-esp32s3-none-elf` target used
-> by the firmware.
 
 ---
 
