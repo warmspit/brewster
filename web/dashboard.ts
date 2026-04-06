@@ -47,7 +47,6 @@ const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChar
     // col 13: gap_before flag set by the server based on raw record timestamps.
     if (Number(point[13]) === 1) {
       gapIndices.push(idx);
-      }
     }
     tempValues.push(Number(point[1]));
     targetValues.push(Number(point[2]));

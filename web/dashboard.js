@@ -912,26 +912,18 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
     Number.isFinite(Number(payload.sample_interval_s)) && Number(payload.sample_interval_s) > 0
       ? Number(payload.sample_interval_s)
       : TREND_SAMPLE_INTERVAL_SECONDS;
-  // A seq jump larger than 1.5× the normal interval means a real gap (reboot / no coverage).
-  const maxExpectedSeqGap = 1.5 * sampleIntervalS;
-  let prevSeq = null;
   let pointCount = 0;
 
   points.forEach((point) => {
     if (!Array.isArray(point) || point.length < 7) return;
     const seq = Number(point[0]);
 
-    // Mark a gap on all sparklines if seq jumped unexpectedly.
-    if (prevSeq !== null) {
-      const seqDiff = seq - prevSeq;
-      if (seqDiff < 0 || seqDiff > maxExpectedSeqGap) {
-        sparklines.forEach((sl) => sl.markGapBeforeNext());
-        // Count the missing packets (backward jump counts as 1).
-        if (seqDiff > maxExpectedSeqGap) historyDropCount += Math.round(seqDiff - 1);
-        else historyDropCount += 1;
-      }
+    // col 13: gap_before — server-annotated from raw record receive timestamps.
+    // More reliable than seq-diff heuristics; accurate regardless of downsampling ratio.
+    if (Number(point[13]) === 1) {
+      sparklines.forEach((sl) => sl.markGapBeforeNext());
     }
-    prevSeq = seq;
+
     lastHistorySeq = seq;
     pointCount++;
 
