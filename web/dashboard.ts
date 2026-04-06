@@ -196,7 +196,7 @@ const updateFromStatus = (
   // First live push after a history load: mark a session boundary on all sparklines.
   if (collecting && sessionGapPending) {
     sessionGapPending = false;
-    sparklines.forEach((sl) => sl.markGapBeforeNext());
+    sparklines.forEach((sl) => sl.markSessionBoundaryBeforeNext());
   }
 
   if (Array.isArray(data.sensors)) {

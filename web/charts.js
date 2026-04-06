@@ -71,10 +71,12 @@ export class Sparkline {
     this._values = [];
     this._targetValues = [];
     this._gapBefore = new Set();
+    this._sessionBoundary = new Set();
     this._hoverX = null;
     this._elapsedSeconds = null;
     this._rafId = null;
     this._pendingGap = false;
+    this._pendingSessionBoundary = false;
     this.canvas.addEventListener("mousemove", (event) => {
       this._updateHover(event.clientX);
     });
@@ -131,10 +133,18 @@ export class Sparkline {
     this._pendingGap = true;
   }
 
+  markSessionBoundaryBeforeNext() {
+    this._pendingSessionBoundary = true;
+  }
+
   push(value) {
     if (this._pendingGap) {
       this._gapBefore.add(this._values.length);
       this._pendingGap = false;
+    }
+    if (this._pendingSessionBoundary) {
+      this._sessionBoundary.add(this._values.length);
+      this._pendingSessionBoundary = false;
     }
     this._values.push(value);
     this._draw();
@@ -152,6 +162,8 @@ export class Sparkline {
   clear() {
     this._values.length = 0;
     this._targetValues.length = 0;
+    this._gapBefore.clear();
+    this._sessionBoundary.clear();
     this._draw();
   }
 
@@ -272,9 +284,29 @@ export class Sparkline {
         drawSegment(segStart, i - 1, false);
         drawSegment(i - 1, i, true);
         segStart = i;
+      } else if (this._sessionBoundary.has(i)) {
+        drawSegment(segStart, i - 1, false);
+        segStart = i;
       }
     }
     drawSegment(segStart, iLast, false);
+
+    // Draw dim grey dashed verticals at session boundaries.
+    if (this._sessionBoundary.size > 0) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(180, 200, 220, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      for (const bi of this._sessionBoundary) {
+        if (bi < iFirst || bi > iLast) continue;
+        const x = xForIdx(bi);
+        ctx.beginPath();
+        ctx.moveTo(x, plotPadTop);
+        ctx.lineTo(x, height - plotPadBottom);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
 
     if (this._targetValues.length > 1) {
       ctx.save();
