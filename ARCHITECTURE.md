@@ -371,5 +371,3 @@ Source is authored in TypeScript; plain JS files are generated from TypeScript (
 `status.rs` is the single source of truth for live device runtime state. `storage.rs` is the single owner of flash I/O. `metrics.rs` reads from both and produces serialised output. Network tasks read state but do not share locks with the control loop — they only touch atomics or use `critical_section` Mutex guards for the short-lived NTP peer table update.
 
 On the server side, `Store` is the single source of truth. `persist.rs` is its only I/O path. HTTP handlers and the SSE broadcaster read from `Store` through shared `Arc` clones; they never touch the persistence file directly.
-
-
