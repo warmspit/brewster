@@ -35,8 +35,8 @@ use crate::firmware::{config, status};
 const PACKET_MAGIC: [u8; 4] = *b"BREW";
 /// Increment this whenever the wire layout changes so the server can detect
 /// format mismatches and drop stale packets cleanly.
-const PACKET_VERSION: u8 = 1;
-const PACKET_SIZE: usize = 33;
+const PACKET_VERSION: u8 = 2;
+const PACKET_SIZE: usize = 37;
 const TEMP_NONE: i16 = i16::MAX;
 
 /// Port the server broadcasts beacons TO; the firmware listens on this port.
@@ -57,6 +57,20 @@ static DISCOVERED_IP: AtomicU32 = AtomicU32::new(0);
 static DISCOVERED_PORT: AtomicU16 = AtomicU16::new(0);
 /// Device uptime (seconds) at the most recent successful discovery event.
 static DISCOVERED_UPTIME_S: AtomicU32 = AtomicU32::new(0);
+
+// ── Boot-time device nonce ────────────────────────────────────────────────────
+
+/// Random 32-bit value generated once at boot, embedded in every telemetry
+/// packet so the server can identify this device session and discard packets
+/// from stale or different devices.
+static DEVICE_NONCE: AtomicU32 = AtomicU32::new(0);
+
+/// Initialise the device nonce from the hardware RNG.  Must be called once
+/// during start-up, before the telemetry task begins sending packets.
+pub(super) fn init_nonce(nonce: u32) {
+    DEVICE_NONCE.store(nonce, Ordering::Relaxed);
+    esp_println::println!("udp telemetry: session nonce = {:#010x}", nonce);
+}
 
 /// Record a freshly discovered server address and reset the expiry clock.
 /// Called on every received beacon (broadcast or mDNS).
@@ -186,7 +200,11 @@ pub async fn udp_discovery_task(stack: Stack<'static>) {
         if current != new_ip {
             esp_println::println!(
                 "udp discovery: server found at {}.{}.{}.{}:{}",
-                ip[0], ip[1], ip[2], ip[3], port
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3],
+                port
             );
         }
         set_discovered_server(ip, port);
@@ -241,7 +259,11 @@ pub async fn udp_telemetry_task(stack: Stack<'static>) {
             (None, Some((ip, port))) => {
                 esp_println::println!(
                     "udp telemetry: server at {}.{}.{}.{}:{} — sending",
-                    ip[0], ip[1], ip[2], ip[3], port
+                    ip[0],
+                    ip[1],
+                    ip[2],
+                    ip[3],
+                    port
                 );
             }
             (Some(_), None) => {
@@ -295,7 +317,11 @@ fn build_packet() -> [u8; PACKET_SIZE] {
     let uptime_s = (Instant::now().as_ticks() / embassy_time::TICK_HZ) as u32;
 
     let snap = status::metrics_snapshot();
-    let ip = if snap.ip_valid { snap.ip_octets } else { [0u8; 4] };
+    let ip = if snap.ip_valid {
+        snap.ip_octets
+    } else {
+        [0u8; 4]
+    };
     let sensor_count = config::SENSORS.len().min(3) as u8;
 
     let encode_temp = |centi: i32| -> i16 {
@@ -320,21 +346,22 @@ fn build_packet() -> [u8; PACKET_SIZE] {
     let mut buf = [0u8; PACKET_SIZE];
     buf[0..4].copy_from_slice(&PACKET_MAGIC);
     buf[4] = PACKET_VERSION;
-    buf[5..9].copy_from_slice(&seq.to_le_bytes());
-    buf[9..13].copy_from_slice(&uptime_s.to_le_bytes());
-    buf[13..15].copy_from_slice(&temp0.to_le_bytes());
-    buf[15..17].copy_from_slice(&temp1.to_le_bytes());
-    buf[17..19].copy_from_slice(&temp2.to_le_bytes());
-    buf[19..21].copy_from_slice(&target_centi.to_le_bytes());
-    buf[21] = output_pct;
-    buf[22] = flags;
-    buf[23] = snap.pid_window_step;
-    buf[24] = snap.pid_on_steps;
-    buf[25] = snap.sensor_status_code;
-    buf[26] = status::sensor_status(1);
-    buf[27] = status::sensor_status(2);
-    buf[28..32].copy_from_slice(&ip);
-    buf[32] = sensor_count;
+    buf[5..9].copy_from_slice(&DEVICE_NONCE.load(Ordering::Relaxed).to_le_bytes());
+    buf[9..13].copy_from_slice(&seq.to_le_bytes());
+    buf[13..17].copy_from_slice(&uptime_s.to_le_bytes());
+    buf[17..19].copy_from_slice(&temp0.to_le_bytes());
+    buf[19..21].copy_from_slice(&temp1.to_le_bytes());
+    buf[21..23].copy_from_slice(&temp2.to_le_bytes());
+    buf[23..25].copy_from_slice(&target_centi.to_le_bytes());
+    buf[25] = output_pct;
+    buf[26] = flags;
+    buf[27] = snap.pid_window_step;
+    buf[28] = snap.pid_on_steps;
+    buf[29] = snap.sensor_status_code;
+    buf[30] = status::sensor_status(1);
+    buf[31] = status::sensor_status(2);
+    buf[32..36].copy_from_slice(&ip);
+    buf[36] = sensor_count;
     buf
 }
 
@@ -349,7 +376,11 @@ pub(super) fn telemetry_stats() -> (u32, u32) {
 
 pub(super) fn discovered_server_ip_octets() -> Option<[u8; 4]> {
     let ip = DISCOVERED_IP.load(Ordering::Relaxed);
-    if ip != 0 { Some(ip.to_be_bytes()) } else { None }
+    if ip != 0 {
+        Some(ip.to_be_bytes())
+    } else {
+        None
+    }
 }
 
 fn parse_ipv4_octets(s: &str) -> Option<[u8; 4]> {

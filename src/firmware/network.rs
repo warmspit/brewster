@@ -53,9 +53,7 @@ static MDNS_SEND_PACKET: ConstStaticCell<[u8; 512]> = ConstStaticCell::new([0; 5
 )]
 pub fn configure_wifi(spawner: &Spawner, wifi: WIFI<'static>, hostname: &str) {
     let Some(ssid) = option_env!("SSID").filter(|ssid| !ssid.is_empty()) else {
-        esp_println::println!(
-            "wifi: disabled, set SSID and PASSWORD in config.local.toml [env]"
-        );
+        esp_println::println!("wifi: disabled, set SSID and PASSWORD in config.local.toml [env]");
         return;
     };
 
@@ -92,6 +90,9 @@ pub fn configure_wifi(spawner: &Spawner, wifi: WIFI<'static>, hostname: &str) {
     );
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+    // Use a third random draw as the session nonce so it is independent of the
+    // network seed (which embassy-net may consume incrementally).
+    udp::init_nonce(rng.random());
 
     static NET_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
     let resources = NET_RESOURCES.init(StackResources::<6>::new());

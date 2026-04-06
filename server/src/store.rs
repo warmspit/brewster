@@ -12,13 +12,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::packet::{Packet, PACKET_VERSION};
-
+use crate::packet::{PACKET_VERSION, Packet};
 
 /// Store one record per this many seconds per uptime elapsed.
 /// At 1s resolution the device sends one packet per second, so every packet is stored.
 const STORE_INTERVAL_S: u32 = 1;
-
 
 #[derive(Clone)]
 pub struct Record {
@@ -169,7 +167,8 @@ impl Store {
 
         // Derive sample interval from the median uptime gap between consecutive returned records.
         let interval_s: u32 = if sampled.len() >= 2 {
-            let mut gaps: Vec<u32> = sampled.windows(2)
+            let mut gaps: Vec<u32> = sampled
+                .windows(2)
                 .filter_map(|w| {
                     let a = w[0].packet.uptime_s;
                     let b = w[1].packet.uptime_s;
@@ -217,31 +216,35 @@ impl Store {
     /// Serialise the ring buffer as a vec of `PersistedRecord` for file rewrite/compaction.
     pub fn current_records(&self) -> Vec<PersistedRecord> {
         let g = self.0.read().unwrap();
-        g.records.iter().map(|r| {
-            let t = r.received_at
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let p = &r.packet;
-            PersistedRecord {
-                t,
-                seq: p.seq,
-                uptime_s: p.uptime_s,
-                temp0: nan_to_null(p.temps[0]),
-                temp1: nan_to_null(p.temps[1]),
-                temp2: nan_to_null(p.temps[2]),
-                target_c: p.target_c,
-                output_pct: p.output_pct,
-                relay_on: p.relay_on,
-                device_collecting: p.collecting,
-                ntp_synced: p.ntp_synced,
-                window_step: p.window_step,
-                on_steps: p.on_steps,
-                sensor_status: p.sensor_status,
-                device_ip: p.device_ip,
-                sensor_count: p.sensor_count,
-            }
-        }).collect()
+        g.records
+            .iter()
+            .map(|r| {
+                let t = r
+                    .received_at
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let p = &r.packet;
+                PersistedRecord {
+                    t,
+                    seq: p.seq,
+                    uptime_s: p.uptime_s,
+                    temp0: nan_to_null(p.temps[0]),
+                    temp1: nan_to_null(p.temps[1]),
+                    temp2: nan_to_null(p.temps[2]),
+                    target_c: p.target_c,
+                    output_pct: p.output_pct,
+                    relay_on: p.relay_on,
+                    device_collecting: p.collecting,
+                    ntp_synced: p.ntp_synced,
+                    window_step: p.window_step,
+                    on_steps: p.on_steps,
+                    sensor_status: p.sensor_status,
+                    device_ip: p.device_ip,
+                    sensor_count: p.sensor_count,
+                }
+            })
+            .collect()
     }
 
     /// Restore from persisted records, dropping those older than the retention window.
@@ -260,6 +263,7 @@ impl Store {
             }
             let packet = Packet {
                 version: PACKET_VERSION,
+                nonce: 0,
                 seq: r.seq,
                 uptime_s: r.uptime_s,
                 temps: [
@@ -279,7 +283,10 @@ impl Store {
                 device_ip: r.device_ip,
                 sensor_count: r.sensor_count,
             };
-            g.records.push_back(Record { received_at, packet });
+            g.records.push_back(Record {
+                received_at,
+                packet,
+            });
             count += 1;
         }
         // Restore the latest packet so /status works immediately without waiting
