@@ -243,10 +243,36 @@ const updateFromStatus = (
     targetInput.value = data.pid.target_c.toFixed(1);
   }
 
-  setText("pid", collecting ? `${data.pid.output_percent.toFixed(1)}%` : "0.0%");
-  const relayState = !collecting ? "Deactivated" : (data.pid.relay_on ? "On" : "Off");
+  const isHeating = collecting && data.pid.heat_on === true;
+  const isCooling = collecting && data.pid.relay_on === true;
+  const pidPct = collecting ? `${data.pid.output_percent.toFixed(1)}%` : "0.0%";
+  byId<HTMLElement>("pid").textContent = pidPct;
+  byId<HTMLElement>("pid").style.color = "";
+  const modeEl = document.getElementById("pid-mode");
+  if (modeEl) {
+    modeEl.textContent = isHeating ? "Heating" : isCooling ? "Cooling" : collecting ? "Idle" : "--";
+    (modeEl as HTMLElement).style.color = isHeating ? "#ffb347" : isCooling ? "#40c4ff" : "";
+  }
+  const relayOn = isHeating || isCooling;
+  const relayState = !collecting ? "Deactivated" : (relayOn ? "On" : "Off");
   setText("relay", relayState);
   byId<HTMLElement>("relay").style.color = relayState === "Deactivated" ? "#ff6e6e" : "";
+  const relayModeEl = document.getElementById("relay-mode");
+  if (relayModeEl) {
+    if (!collecting) {
+      relayModeEl.textContent = "--";
+      (relayModeEl as HTMLElement).style.color = "";
+    } else if (isHeating) {
+      relayModeEl.textContent = "Heat";
+      (relayModeEl as HTMLElement).style.color = "#ffb347";
+    } else if (isCooling) {
+      relayModeEl.textContent = "Cool";
+      (relayModeEl as HTMLElement).style.color = "#40c4ff";
+    } else {
+      relayModeEl.textContent = "Idle";
+      (relayModeEl as HTMLElement).style.color = "";
+    }
+  }
 
   if (collecting) {
     if (Number.isFinite(data.pid.kp)) {
@@ -261,6 +287,7 @@ const updateFromStatus = (
       window_step: data.pid.window_step,
       on_steps: data.pid.on_steps,
       relay_on: data.pid.relay_on ? 1 : 0,
+      heat_on: data.pid.heat_on ? 1 : 0,
     };
     pidCharts.forEach((pidChart) => {
       pidChart.push(sample);

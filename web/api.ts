@@ -56,6 +56,7 @@ export type PidSample = {
   window_step: number;
   on_steps: number;
   relay_on: number;
+  heat_on: number;
 };
 
 export type HistoryPayload = {

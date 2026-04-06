@@ -161,7 +161,10 @@ async fn main(spawner: Spawner) -> ! {
             config::ds18b20_resolution_bits(),
             config::ds18b20_conversion_ms()
         ),
-        Err(e) => println!("ds18b20: resolution config failed: {:?} — using hardware default", e),
+        Err(e) => println!(
+            "ds18b20: resolution config failed: {:?} — using hardware default",
+            e
+        ),
     }
 
     let mut relay = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
@@ -185,7 +188,18 @@ async fn main(spawner: Spawner) -> ! {
         .i(PID_KI, config::PID_OUTPUT_LIMIT_PERCENT)
         .d(PID_KD, config::PID_OUTPUT_LIMIT_PERCENT);
 
+    let mut heat_pid = Pid::new(
+        status::get_target_temp_c(),
+        config::PID_OUTPUT_LIMIT_PERCENT,
+    );
+    heat_pid
+        .p(PID_KP, config::PID_OUTPUT_LIMIT_PERCENT)
+        .i(PID_KI, config::PID_OUTPUT_LIMIT_PERCENT)
+        .d(PID_KD, config::PID_OUTPUT_LIMIT_PERCENT);
+
     let mut window_step = 0u32;
+    let mut heat_window_step = 0u32;
+    let mut last_target_c = status::get_target_temp_c();
     let startup_frame = pixel_frame(controller::Rgb8 {
         red: 0,
         green: 0,
@@ -220,7 +234,10 @@ async fn main(spawner: Spawner) -> ! {
             &mut relay,
             &mut heat_relay,
             &mut pid,
+            &mut heat_pid,
             &mut window_step,
+            &mut heat_window_step,
+            &mut last_target_c,
         )
         .await;
 

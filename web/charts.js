@@ -360,7 +360,9 @@ export class PidChart {
   }
 
   static _signedRelay(sample) {
-    return sample.relay_on ? -1 : 0;
+    if (sample.relay_on) return -1;
+    if (sample.heat_on) return 1;
+    return 0;
   }
 
   constructor(canvas) {
@@ -603,7 +605,7 @@ export class PidChart {
       const x = clampedX;
       const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
       const signedOutput = PidChart._signedOutput(sample);
-      const relayMode = sample.relay_on ? "cool" : "off";
+      const relayMode = sample.relay_on ? "cool" : sample.heat_on ? "heat" : "off";
       const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
       const tip2 = `kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
       const tip3 = `drv:${signedOutput.toFixed(2)} win:${sample.window_step} on:${sample.on_steps} r:${relayMode}`;

@@ -286,21 +286,36 @@ export class Sparkline {
       ctx.beginPath();
       ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
       ctx.clip();
-      ctx.beginPath();
       ctx.lineWidth = 1.5;
       ctx.strokeStyle = "#f7d774";
       ctx.setLineDash([5, 4]);
       let tStarted = false;
+      let prevTargetV: number | null = null;
+      let prevTargetY: number | null = null;
+      const targetTransitions: { x: number; yFrom: number; yTo: number }[] = [];
+      ctx.beginPath();
       for (let i = iFirst; i <= iLast; i++) {
         if (i >= this.targetValues.length) break;
         const v = this.targetValues[i];
-        if (!Number.isFinite(v)) { tStarted = false; continue; }
+        if (!Number.isFinite(v)) { tStarted = false; prevTargetV = null; prevTargetY = null; continue; }
         const x = xForIdx(i);
         const y = yFor(v);
-        if (!tStarted) { ctx.moveTo(x, y); tStarted = true; } else { ctx.lineTo(x, y); }
+        const valueJumped = prevTargetV !== null && Math.abs(v - prevTargetV) > 0.05;
+        if (!tStarted || valueJumped) {
+          if (valueJumped) targetTransitions.push({ x, yFrom: prevTargetY!, yTo: y });
+          ctx.moveTo(x, y); tStarted = true;
+        } else { ctx.lineTo(x, y); }
+        prevTargetV = v;
+        prevTargetY = y;
       }
       ctx.stroke();
       ctx.setLineDash([]);
+      for (const tr of targetTransitions) {
+        ctx.beginPath();
+        ctx.moveTo(tr.x, Math.min(tr.yFrom, tr.yTo));
+        ctx.lineTo(tr.x, Math.max(tr.yFrom, tr.yTo));
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
@@ -375,7 +390,9 @@ export class PidChart {
   }
 
   private static signedRelay(sample: PidSample): number {
-    return sample.relay_on ? -1 : 0;
+    if (sample.relay_on) return -1;
+    if (sample.heat_on) return 1;
+    return 0;
   }
 
   constructor(canvas: HTMLCanvasElement) {
@@ -615,7 +632,7 @@ export class PidChart {
       const x = clampedX;
       const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
       const signedOutput = PidChart.signedOutput(sample);
-      const relayMode = sample.relay_on ? "cool" : "off";
+      const relayMode = sample.relay_on ? "cool" : sample.heat_on ? "heat" : "off";
       const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
       const tip2 = `kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
       const tip3 = `drv:${signedOutput.toFixed(2)} win:${sample.window_step} on:${sample.on_steps} r:${relayMode}`;

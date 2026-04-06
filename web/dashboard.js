@@ -435,32 +435,33 @@ class Sparkline {
       ctx.beginPath();
       ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
       ctx.clip();
-      ctx.beginPath();
       ctx.lineWidth = 1.5;
       ctx.strokeStyle = "#f7d774";
       ctx.setLineDash([5, 4]);
       let tStarted = false;
+      let prevTargetV = null;
       let prevTargetY = null;
       const targetTransitions = []; // {x, yFrom, yTo} for each step change
+      ctx.beginPath();
       for (let i = iFirst; i <= iLast; i++) {
         if (i >= this._targetValues.length) break;
         const v = this._targetValues[i];
-        if (!Number.isFinite(v)) { tStarted = false; prevTargetY = null; continue; }
+        if (!Number.isFinite(v)) { tStarted = false; prevTargetV = null; prevTargetY = null; continue; }
         const x = xForIdx(i);
         const y = yFor(v);
-        // When the target value steps to a new level, start a fresh sub-path so
-        // the dashed line never draws a diagonal/vertical connector between the
-        // old and new setpoint — the target is a step function, not a ramp.
-        const yJumped = prevTargetY !== null && Math.abs(y - prevTargetY) > 0.5;
-        if (!tStarted || yJumped) {
-          if (yJumped) targetTransitions.push({ x, yFrom: prevTargetY, yTo: y });
+        // Detect a genuine setpoint change (>0.05°C) — not a pixel-level rounding difference.
+        const valueJumped = prevTargetV !== null && Math.abs(v - prevTargetV) > 0.05;
+        if (!tStarted || valueJumped) {
+          if (valueJumped) targetTransitions.push({ x, yFrom: prevTargetY, yTo: y });
           ctx.moveTo(x, y); tStarted = true;
         } else { ctx.lineTo(x, y); }
+        prevTargetV = v;
         prevTargetY = y;
       }
       ctx.stroke();
 
-      // Draw dashed yellow vertical lines at each step-change transition point.
+      // Draw solid yellow vertical lines at each step-change transition point.
+      ctx.setLineDash([]);
       for (const tr of targetTransitions) {
         ctx.beginPath();
         ctx.moveTo(tr.x, Math.min(tr.yFrom, tr.yTo));
@@ -535,7 +536,9 @@ class PidChart {
   }
 
   static _signedRelay(sample) {
-    return sample.relay_on ? -1 : 0;
+    if (sample.relay_on) return -1;
+    if (sample.heat_on) return 1;
+    return 0;
   }
 
   constructor(canvas) {
@@ -782,7 +785,7 @@ class PidChart {
       const x = clampedX;
       const hoverTime = elapsedSeconds * zoomStart + ratio * elapsedSeconds * (zoomEnd - zoomStart);
       const signedOutput = PidChart._signedOutput(sample);
-      const relayMode = sample.relay_on ? "cool" : "off";
+      const relayMode = sample.relay_on ? "cool" : sample.heat_on ? "heat" : "off";
       const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
       const tip2 = `kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
       const tip3 = `drv:${signedOutput.toFixed(2)} win:${sample.window_step} on:${sample.on_steps} r:${relayMode}`;
@@ -1074,10 +1077,36 @@ const updateFromStatus = (
     targetInput.value = data.pid.target_c.toFixed(1);
   }
 
-  setText("pid", collecting ? `${data.pid.output_percent.toFixed(1)}%` : "0.0%");
-  const relayState = !collecting ? "Deactivated" : (data.pid.relay_on ? "On" : "Off");
+  const isHeating = collecting && data.pid.heat_on === true;
+  const isCooling = collecting && data.pid.relay_on === true;
+  const pidPct = collecting ? `${data.pid.output_percent.toFixed(1)}%` : "0.0%";
+  byId("pid").textContent = pidPct;
+  byId("pid").style.color = "";
+  const modeEl = document.getElementById("pid-mode");
+  if (modeEl) {
+    modeEl.textContent = isHeating ? "Heating" : isCooling ? "Cooling" : collecting ? "Idle" : "--";
+    modeEl.style.color = isHeating ? "#ffb347" : isCooling ? "#40c4ff" : "";
+  }
+  const relayOn = isHeating || isCooling;
+  const relayState = !collecting ? "Deactivated" : (relayOn ? "On" : "Off");
   setText("relay", relayState);
   byId("relay").style.color = relayState === "Deactivated" ? "#ff6e6e" : "";
+  const relayModeEl = document.getElementById("relay-mode");
+  if (relayModeEl) {
+    if (!collecting) {
+      relayModeEl.textContent = "--";
+      relayModeEl.style.color = "";
+    } else if (isHeating) {
+      relayModeEl.textContent = "Heat";
+      relayModeEl.style.color = "#ffb347";
+    } else if (isCooling) {
+      relayModeEl.textContent = "Cool";
+      relayModeEl.style.color = "#40c4ff";
+    } else {
+      relayModeEl.textContent = "Idle";
+      relayModeEl.style.color = "";
+    }
+  }
 
   if (collecting) {
     if (Number.isFinite(data.pid.kp)) {
@@ -1092,6 +1121,7 @@ const updateFromStatus = (
       window_step: data.pid.window_step,
       on_steps: data.pid.on_steps,
       relay_on: data.pid.relay_on ? 1 : 0,
+      heat_on: data.pid.heat_on ? 1 : 0,
     };
     pidCharts.forEach((pidChart) => {
       pidChart.push(sample);
