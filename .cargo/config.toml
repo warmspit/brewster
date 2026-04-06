@@ -7,7 +7,6 @@ rustflags = [
   "-C", "link-arg=-nostartfiles",
 ]
 
+# Default target for the firmware crate.
+# VS Code tasks and rust-analyzer both pass this explicitly.
 target = "xtensa-esp32s3-none-elf"
-
-[unstable]
-build-std = ["core", "alloc"]

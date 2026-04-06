@@ -3,12 +3,15 @@
 
 use alloc::string::ToString;
 
+#[cfg(feature = "http-server")]
 #[path = "network/http.rs"]
 mod http;
 #[path = "network/mdns.rs"]
 mod mdns;
 #[path = "network/ntp.rs"]
 mod ntp;
+#[path = "network/udp.rs"]
+mod udp;
 #[path = "network/wifi.rs"]
 mod wifi;
 
@@ -25,12 +28,15 @@ use static_cell::{ConstStaticCell, StaticCell};
 
 use super::shared;
 
+#[cfg(feature = "http-server")]
 const HTTP_PORT: u16 = 80;
 const MDNS_PORT: u16 = 5353;
 const MDNS_MULTICAST: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_MULTICAST_V6: Ipv6Address = Ipv6Address::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
 
+#[cfg(feature = "http-server")]
 static HTTP_RX_BUFFER: ConstStaticCell<[u8; 1024]> = ConstStaticCell::new([0; 1024]);
+#[cfg(feature = "http-server")]
 static HTTP_TX_BUFFER: ConstStaticCell<[u8; 1024]> = ConstStaticCell::new([0; 1024]);
 static MDNS_RX_META: ConstStaticCell<[PacketMetadata; 4]> =
     ConstStaticCell::new([PacketMetadata::EMPTY; 4]);
@@ -47,9 +53,7 @@ static MDNS_SEND_PACKET: ConstStaticCell<[u8; 512]> = ConstStaticCell::new([0; 5
 )]
 pub fn configure_wifi(spawner: &Spawner, wifi: WIFI<'static>, hostname: &str) {
     let Some(ssid) = option_env!("SSID").filter(|ssid| !ssid.is_empty()) else {
-        esp_println::println!(
-            "wifi: disabled, set SSID and PASSWORD in config.local.toml [env]"
-        );
+        esp_println::println!("wifi: disabled, set SSID and PASSWORD in config.local.toml [env]");
         return;
     };
 
@@ -87,8 +91,8 @@ pub fn configure_wifi(spawner: &Spawner, wifi: WIFI<'static>, hostname: &str) {
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
-    static NET_RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
-    let resources = NET_RESOURCES.init(StackResources::<4>::new());
+    static NET_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
+    let resources = NET_RESOURCES.init(StackResources::<6>::new());
 
     let (stack, runner) = embassy_net::new(wifi_interface, net_config, resources, seed);
 
@@ -102,10 +106,25 @@ pub fn configure_wifi(spawner: &Spawner, wifi: WIFI<'static>, hostname: &str) {
     spawner.spawn(wifi::wifi_net_task(runner)).unwrap();
     spawner.spawn(wifi::wifi_status_task(stack)).unwrap();
     spawner.spawn(mdns::mdns_task(stack)).unwrap();
-    spawner.spawn(http::http_status_task(stack)).unwrap();
+    #[cfg(feature = "http-server")]
+    if super::status::feature_http_enabled() {
+        spawner.spawn(http::http_status_task(stack)).unwrap();
+    }
     spawner.spawn(ntp::ntp_sync_task(stack)).unwrap();
+    spawner.spawn(udp::udp_discovery_task(stack)).unwrap();
+    spawner.spawn(udp::udp_telemetry_task(stack)).unwrap();
 }
 
 fn normalized_dhcp_hostname(input: &str) -> heapless::String<32> {
     shared::normalized_dhcp_hostname(input)
+}
+
+/// Returns `(packets_sent, packets_failed)` from the UDP telemetry sender since boot.
+pub(crate) fn udp_telemetry_stats() -> (u32, u32) {
+    udp::telemetry_stats()
+}
+
+/// Returns the most recently discovered server IPv4 octets, or `None` if not yet discovered.
+pub(crate) fn udp_discovered_server_ip_octets() -> Option<[u8; 4]> {
+    udp::discovered_server_ip_octets()
 }

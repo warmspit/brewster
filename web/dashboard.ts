@@ -10,6 +10,13 @@ let collectionToggleInFlight = false;
 let pollRequestInFlight = false;
 let loadedHistoryBaseSeconds = 0;
 let lastUptimeSeconds: number | null = null;
+let uptimeAtHistoryLoad: number | null = null;
+// Set to true after each loadHistoryFromDevice so the first merged point gets a
+// session-boundary gap marker, clearly separating persisted history from live data.
+let sessionGapPending = false;
+// Last valid kp/ki/kd seen (from history or live status). Used to fill gaps
+// when the server status doesn't carry PID gains (UDP packet has no kp/ki/kd).
+let lastKnownPidGains = { kp: 0, ki: 0, kd: 0 };
 
 const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChart: PidChart): Promise<void> => {
   const response = await fetch(`/history?points=${HISTORY_FETCH_POINTS}`, { cache: "no-store" });
@@ -19,15 +26,30 @@ const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChar
   const payload = (await response.json()) as HistoryPayload;
   const points = Array.isArray(payload.points) ? payload.points : [];
   const tempValues: number[] = [];
+  const targetValues: number[] = [];
   const pidValues: PidSample[] = [];
   // Keyed by sensor index (1-based); extra sensor temps from history columns 7+
   const extraTempValues: Map<number, number[]> = new Map();
+  // Indices where a seq gap indicates missed server coverage or device reboot.
+  const gapIndices: number[] = [];
+  let prevSeq: number | null = null;
 
   points.forEach((point) => {
     if (!Array.isArray(point) || point.length < 7) {
       return;
     }
+    const seq = Number(point[0]);
+    const idx = tempValues.length;
+    // Flag if seq went backwards (reboot) or jumped more than 1.5× the expected interval.
+    if (prevSeq !== null) {
+      const seqDiff = seq - prevSeq;
+      if (seqDiff < 0 || seqDiff > 1.5 * (payload.sample_interval_s ?? 60)) {
+        gapIndices.push(idx);
+      }
+    }
+    prevSeq = seq;
     tempValues.push(Number(point[1]));
+    targetValues.push(Number(point[2]));
     pidValues.push({
       target_c: Number(point[2]),
       kp: 14.0,
@@ -53,21 +75,32 @@ const loadHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChar
       ? Number(payload.sample_interval_s)
       : TREND_SAMPLE_INTERVAL_SECONDS;
   loadedHistoryBaseSeconds = Math.max(0, tempValues.length - 1) * sampleIntervalS;
+  uptimeAtHistoryLoad = null; // reset; will be captured on next updateFromStatus call
+  sessionGapPending = true;  // next merge point starts a new visual segment
 
   const primarySparkline = sparklines.get(0);
   if (primarySparkline) {
     primarySparkline.setValues(tempValues);
+    primarySparkline.setTargetValues(targetValues);
+    primarySparkline.setGapBefore(gapIndices);
     primarySparkline.setElapsedSeconds(loadedHistoryBaseSeconds);
   }
   for (const [sensorIdx, values] of extraTempValues) {
     const sl = sparklines.get(sensorIdx);
     if (sl) {
       sl.setValues(values);
+      sl.setTargetValues(targetValues);
+      sl.setGapBefore(gapIndices);
       sl.setElapsedSeconds(loadedHistoryBaseSeconds);
     }
   }
   pidChart.setValues(pidValues);
   pidChart.setElapsedSeconds(loadedHistoryBaseSeconds);
+  // Capture last kp/ki/kd from history so live pushes stay on the same scale.
+  if (pidValues.length > 0) {
+    const last = pidValues[pidValues.length - 1];
+    if (Number.isFinite(last.kp)) lastKnownPidGains = { kp: last.kp, ki: last.ki, kd: last.kd };
+  }
 };
 
 const mergeHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidChart: PidChart): Promise<void> => {
@@ -88,8 +121,10 @@ const mergeHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidCha
     if (!Number.isFinite(seq) || seq <= lastHistorySeq) {
       return;
     }
+
     lastHistorySeq = seq;
     primarySparkline.push(Number(point[1]));
+    primarySparkline.pushTarget(Number(point[2]));
     // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2, etc.
     for (let col = 7; col < point.length; col++) {
       const sensorIdx = col - 6;
@@ -97,6 +132,7 @@ const mergeHistoryFromDevice = async (sparklines: Map<number, Sparkline>, pidCha
       if (sl) {
         const raw = point[col];
         sl.push(raw != null ? Number(raw) : NaN);
+        sl.pushTarget(Number(point[2]));
       }
     }
     pidChart.push({
@@ -133,7 +169,8 @@ const updateFromStatus = (
 
   lastUptimeSeconds = data.system.uptime_s;
   if (collecting) {
-    const totalElapsed = loadedHistoryBaseSeconds + data.system.uptime_s;
+    if (uptimeAtHistoryLoad === null) uptimeAtHistoryLoad = data.system.uptime_s;
+    const totalElapsed = loadedHistoryBaseSeconds + (data.system.uptime_s - uptimeAtHistoryLoad);
     sparklines.forEach((sparkline) => {
       sparkline.setElapsedSeconds(totalElapsed);
     });
@@ -143,9 +180,17 @@ const updateFromStatus = (
   }
 
   setText("title", `${data.device.toUpperCase()} CONTROL PANEL`);
-  setText("updated", `Updated ${new Date().toLocaleTimeString()}`);
+  const hostnameEl = document.getElementById("device-hostname");
+  if (hostnameEl) hostnameEl.textContent = data.hostname ?? "";
+  setText("updated", new Date().toLocaleTimeString());
   if (data.system && data.system.uptime_s !== null) {
-    setText("uptime", `Uptime: ${formatUptime(data.system.uptime_s)}`);
+    setText("uptime", formatUptime(data.system.uptime_s));
+  }
+  const dropped = data.system.packets_dropped ?? 0;
+  const seqEl = document.getElementById("seq-info");
+  if (seqEl) {
+    seqEl.textContent = `seq: ${data.system.seq ?? "--"}  drops: ${dropped}`;
+    seqEl.style.color = dropped > 0 ? "var(--warn)" : "";
   }
   ensureTemperatureCharts(data.sensors || []);
 
@@ -153,6 +198,12 @@ const updateFromStatus = (
   if (primarySensor) {
     setText("temp", formatTemp(primarySensor.temperature_c, "C"));
     setText("temp-secondary", formatTemp(primarySensor.temperature_f, "F"));
+  }
+
+  // First live push after a history load: mark a session boundary on all sparklines.
+  if (collecting && sessionGapPending) {
+    sessionGapPending = false;
+    sparklines.forEach((sl) => sl.markGapBeforeNext());
   }
 
   if (Array.isArray(data.sensors)) {
@@ -164,6 +215,7 @@ const updateFromStatus = (
         const sensorChart = sparklines.get(sensor.index);
         if (sensorChart) {
           sensorChart.push(sensor.temperature_c);
+          sensorChart.pushTarget(data.pid.target_c);
         }
       }
     });
@@ -182,11 +234,14 @@ const updateFromStatus = (
   byId<HTMLElement>("relay").style.color = relayState === "Deactivated" ? "#ff6e6e" : "";
 
   if (collecting) {
+    if (Number.isFinite(data.pid.kp)) {
+      lastKnownPidGains = { kp: data.pid.kp, ki: data.pid.ki, kd: data.pid.kd };
+    }
     const sample: PidSample = {
       target_c: data.pid.target_c,
-      kp: data.pid.kp,
-      ki: data.pid.ki,
-      kd: data.pid.kd,
+      kp: lastKnownPidGains.kp,
+      ki: lastKnownPidGains.ki,
+      kd: lastKnownPidGains.kd,
       output_percent: data.pid.output_percent,
       window_step: data.pid.window_step,
       on_steps: data.pid.on_steps,
@@ -199,6 +254,17 @@ const updateFromStatus = (
 
   setText("ip", data.system.ip || "--");
   updateNtpPill(data.system.ntp.synced);
+
+  // Device IP stat: make it a clickable link when a real IP is available.
+  const deviceIp = data.system.ip || "";
+  const ipValid = deviceIp !== "" && !deviceIp.startsWith("Error") && deviceIp !== "0.0.0.0";
+  const devicePort = data.system.device_http_port ?? 80;
+  const ipEl = byId<HTMLAnchorElement>("ip");
+  if (ipValid) {
+    ipEl.href = devicePort === 80 ? `http://${deviceIp}/` : `http://${deviceIp}:${devicePort}/`;
+  } else {
+    ipEl.removeAttribute("href");
+  }
 };
 
 const loop = async (
@@ -268,6 +334,26 @@ const start = (): void => {
   pidCard.dataset.sensorIndex = "0";
   pidCard.dataset.cardType = "pid";
 
+  const buildTempLegend = (card: HTMLElement): void => {
+    let el = card.querySelector<HTMLElement>(".chart-legend");
+    if (!el) { el = document.createElement("div"); el.className = "chart-legend"; card.appendChild(el); }
+    el.innerHTML =
+      `<span class="legend-item"><span class="legend-swatch" style="background:linear-gradient(90deg,#40c4ff,#40d990)"></span>Temperature</span>` +
+      `<span class="legend-item"><span class="legend-swatch" style="background:#f7d774"></span>Target \u00b0C</span>` +
+      `<span class="legend-item"><span class="legend-swatch" style="background:rgba(255,80,80,0.75)"></span>Missing data</span>`;
+  };
+
+  const buildPidLegend = (card: HTMLElement): void => {
+    let el = card.querySelector<HTMLElement>(".chart-legend");
+    if (!el) { el = document.createElement("div"); el.className = "chart-legend"; card.appendChild(el); }
+    el.innerHTML = [
+      ["#6ec5ff", "Kp"], ["#8ef0c8", "Ki"], ["#b28cff", "Kd"],
+      ["#7cf3ff", "Win step"], ["#ffb3d1", "On steps"], ["#ff8d6e", "Output%"], ["#ffffff", "Relay"],
+    ].map(([color, label]) =>
+      `<span class="legend-item"><span class="legend-swatch" style="background:${color}"></span>${label}</span>`
+    ).join("");
+  };
+
   sparklines.set(0, new Sparkline(primaryCanvas));
   pidCharts.set(0, new PidChart(pidCanvas));
 
@@ -281,6 +367,8 @@ const start = (): void => {
   if (primaryPidLabel) {
     pidLabelEls.set(0, primaryPidLabel);
   }
+  buildTempLegend(primaryCard);
+  buildPidLegend(pidCard);
 
   const setControlProbeIndex = (nextIndex: number | undefined): void => {
     if (!Number.isFinite(nextIndex)) {
@@ -347,24 +435,31 @@ const start = (): void => {
   const hoverRatioForClientX = (canvas: HTMLCanvasElement, clientX: number): number => {
     const rect = canvas.getBoundingClientRect();
     const canvasX = ((clientX - rect.left) / rect.width) * canvas.width;
-    const { axisPadLeft, sparklinePadRight } = CHART_LAYOUT;
-    const plotWidth = Math.max(1, canvas.width - axisPadLeft - sparklinePadRight);
+    const { axisPadLeft, sparklinePadRight, pidPadRight } = CHART_LAYOUT;
+    const isPid = canvas.closest("article")?.dataset.cardType === "pid";
+    const rightPad = isPid ? pidPadRight : sparklinePadRight;
+    const plotWidth = Math.max(1, canvas.width - axisPadLeft - rightPad);
     return Math.max(0, Math.min(1, (canvasX - axisPadLeft) / plotWidth));
   };
 
-  // Set up hover synchronization between primary temperature chart and PID chart
-  primaryChart.canvas.addEventListener("mousemove", (event: MouseEvent) => {
-    primaryPidChart.setHoverRatio(hoverRatioForClientX(primaryChart.canvas, event.clientX));
+  // Broadcast hover ratio to all charts for synchronized crosshair tracking.
+  const broadcastHoverRatio = (ratio: number | null): void => {
+    sparklines.forEach((s) => s.setHoverRatio(ratio));
+    pidCharts.forEach((c) => c.setHoverRatio(ratio));
+  };
+  // Keep last ratio so the cursor stays alive when the mouse crosses legend/header
+  // gaps between canvases (internal canvas listeners are gone so no race possible).
+  let lastHoverRatio: number | null = null;
+  section.addEventListener("mousemove", (event: MouseEvent) => {
+    const canvas = (event.target as Element)?.closest("canvas.chart");
+    if (canvas instanceof HTMLCanvasElement) {
+      lastHoverRatio = hoverRatioForClientX(canvas, event.clientX);
+      broadcastHoverRatio(lastHoverRatio);
+    } else if (lastHoverRatio !== null) {
+      broadcastHoverRatio(lastHoverRatio);
+    }
   });
-  primaryChart.canvas.addEventListener("mouseleave", () => {
-    primaryPidChart.setHoverRatio(null);
-  });
-  pidCanvas.addEventListener("mousemove", (event: MouseEvent) => {
-    primaryChart.setHoverRatio(hoverRatioForClientX(pidCanvas, event.clientX));
-  });
-  pidCanvas.addEventListener("mouseleave", () => {
-    primaryChart.setHoverRatio(null);
-  });
+  section.addEventListener("mouseleave", () => { lastHoverRatio = null; broadcastHoverRatio(null); });
 
   const applyZoom = (pivotRatio: number, factor: number): void => {
     const span = zoomEnd - zoomStart;
@@ -451,6 +546,7 @@ const start = (): void => {
     sparkline.setElapsedSeconds(loadedHistoryBaseSeconds);
 
     section.appendChild(newTempCard);
+    buildTempLegend(newTempCard);
     return true;
   };
 
@@ -479,6 +575,7 @@ const start = (): void => {
     pidCharts.set(index, chart);
 
     section.appendChild(newPidCard);
+    buildPidLegend(newPidCard);
     return true;
   };
 
@@ -540,8 +637,8 @@ const start = (): void => {
       setTargetFeedback("Enter a valid number", "error");
       return;
     }
-    if (parsed < -20 || parsed > 25) {
-      setTargetFeedback("Target must be between -20 and 25 C", "error");
+    if (parsed < -20 || parsed > 100) {
+      setTargetFeedback("Target must be between -20 and 100 C", "error");
       return;
     }
 
@@ -602,7 +699,25 @@ const start = (): void => {
       setPidProbeLabel,
       ensureTemperatureCharts,
     );
-  }, 5000);
+  }, 1000);
+
+  // SSE: update immediately when the server receives a UDP packet.
+  // Falls back to the 1-second interval if /events is unavailable (e.g. on the ESP32).
+  const evtSrc = new EventSource("/events");
+  let sseOpened = false;
+  evtSrc.onopen = (): void => { sseOpened = true; };
+  evtSrc.onerror = (): void => { if (!sseOpened) evtSrc.close(); };
+  evtSrc.addEventListener("pkt", (): void => {
+    void loop(
+      sparklines,
+      pidCharts,
+      primaryPidChart,
+      setControlProbeIndex,
+      setTempProbeLabel,
+      setPidProbeLabel,
+      ensureTemperatureCharts,
+    );
+  });
 
   const menuBtn = byId<HTMLButtonElement>("menu-btn");
   const menuDropdown = byId<HTMLElement>("menu-dropdown");
@@ -614,6 +729,8 @@ const start = (): void => {
     collecting = value;
     startDataBtn.disabled = value;
     stopDataBtn.disabled = !value;
+    const dot = document.getElementById("collect-dot");
+    if (dot) dot.classList.toggle("active", value);
   };
 
   syncCollectingUi = setCollecting;
@@ -676,12 +793,14 @@ const start = (): void => {
   });
 
   clearDataBtn.addEventListener("click", () => {
+    if (!confirm("Clear all history? This cannot be undone.")) { return; }
     clearHistoryOnDevice()
       .then(() => {
         sparklines.forEach((sparkline) => sparkline.clear());
         pidCharts.forEach((chart) => chart.clear());
         lastUptimeSeconds = null;
         loadedHistoryBaseSeconds = 0;
+        uptimeAtHistoryLoad = null;
       })
       .catch((error) => {
         setText("updated", `Clear failed: ${String(error)}`);

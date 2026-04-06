@@ -11,8 +11,10 @@ use super::shared;
 // Re-export items from storage so existing callers are unaffected.
 pub use super::storage::{
     ProbeNameError, RuntimeSample, TEMP_PROBE_NAME_MAX_LEN, clear_history_persistent,
+    collection_enabled_persisted, feature_http_enabled, feature_prometheus_enabled,
     get_target_temp_c, history_sample_interval_secs, history_snapshot, history_total_samples,
-    init_persistent_target, set_target_temp_c_persistent, set_temp_probe_name, temp_probe_name,
+    init_persistent_target, set_collection_enabled_persistent, set_features_persistent,
+    set_target_temp_c_persistent, set_temp_probe_name, temp_probe_name,
 };
 
 #[repr(u8)]
@@ -134,6 +136,7 @@ static LAST_LED_BLUE: AtomicU8 = AtomicU8::new(0);
 static HTTP_EXCHANGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static HTTP_EXCHANGE_ERROR: AtomicBool = AtomicBool::new(false);
 static HTTP_LED_ACTIVE_UNTIL_TICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(0));
+static UDP_SEND_ACTIVE_UNTIL_TICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(0));
 static LAST_PID_WINDOW_STEP: AtomicU8 = AtomicU8::new(0);
 static LAST_PID_ON_STEPS: AtomicU8 = AtomicU8::new(0);
 static COLLECTION_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -706,6 +709,27 @@ pub fn http_led_state() -> HttpLedState {
             HttpLedState::Idle
         }
     }
+}
+
+/// Notify that a UDP telemetry packet was just sent successfully; LED goes
+/// violet for `UDP_LED_HOLD_MS` milliseconds.
+const UDP_LED_HOLD_MS: u64 = 150;
+
+pub fn udp_send_notify() {
+    let now_ticks = embassy_time::Instant::now().as_ticks();
+    let hold_ticks = UDP_LED_HOLD_MS.saturating_mul(embassy_time::TICK_HZ) / 1_000;
+    critical_section::with(|cs| {
+        UDP_SEND_ACTIVE_UNTIL_TICKS
+            .borrow(cs)
+            .set(now_ticks.saturating_add(hold_ticks));
+    });
+}
+
+/// Returns `true` while the UDP-send violet flash is still active.
+pub fn udp_led_active() -> bool {
+    let now_ticks = embassy_time::Instant::now().as_ticks();
+    let active_until = critical_section::with(|cs| UDP_SEND_ACTIVE_UNTIL_TICKS.borrow(cs).get());
+    now_ticks < active_until
 }
 
 pub fn current_unix_time_micros() -> Option<u64> {

@@ -1,4 +1,4 @@
-export const HISTORY_FETCH_POINTS = 400;
+export const HISTORY_FETCH_POINTS = 2000;
 
 export const submitTargetTemperature = async (tempC) => {
   const response = await fetch("/temperature", {

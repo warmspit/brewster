@@ -122,6 +122,14 @@ async fn main(spawner: Spawner) -> ! {
         );
     }
 
+    // Restore collection state from flash so a power cycle resumes collection.
+    if status::collection_enabled_persisted() {
+        status::set_collection_enabled(true);
+        println!("collection: resumed from flash (was active before reboot)");
+    } else {
+        println!("collection: starting idle (not active before reboot)");
+    }
+
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
@@ -143,6 +151,18 @@ async fn main(spawner: Spawner) -> ! {
 
     let one_wire_pin = sensor::configure_one_wire_pin(Flex::new(peripherals.GPIO5));
     let mut one_wire_pin = one_wire_pin;
+    match sensor::ds18b20_configure_resolution(
+        &mut one_wire_pin,
+        &mut delay,
+        config::ds18b20_resolution_bits(),
+    ) {
+        Ok(()) => println!(
+            "ds18b20: resolution set to {} bits ({} ms conversion)",
+            config::ds18b20_resolution_bits(),
+            config::ds18b20_conversion_ms()
+        ),
+        Err(e) => println!("ds18b20: resolution config failed: {:?} — using hardware default", e),
+    }
 
     let mut relay = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
 
@@ -202,8 +222,7 @@ async fn main(spawner: Spawner) -> ! {
         )
         .await;
 
-        // Steady green after boot. During HTTP exchanges, show blue; on HTTP error, show red.
-        // Outside HTTP exchanges, any runtime error (for example sensor probe failures) is red.
+        // Priority: HTTP error (red) > HTTP ok (blue) > UDP send (violet) > idle.
         let display_color = match status::http_led_state() {
             status::HttpLedState::Idle => {
                 if status::runtime_error_active() {
@@ -211,6 +230,12 @@ async fn main(spawner: Spawner) -> ! {
                         red: 10,
                         green: 0,
                         blue: 0,
+                    }
+                } else if status::udp_led_active() {
+                    controller::Rgb8 {
+                        red: 6,
+                        green: 0,
+                        blue: 10,
                     }
                 } else {
                     controller::Rgb8 {
@@ -241,7 +266,7 @@ async fn main(spawner: Spawner) -> ! {
         }
 
         Timer::after(Duration::from_millis(
-            config::CONTROL_PERIOD_MS.saturating_sub(config::DS18B20_CONVERSION_MS),
+            config::CONTROL_PERIOD_MS.saturating_sub(config::ds18b20_conversion_ms()),
         ))
         .await;
     }

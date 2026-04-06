@@ -5,6 +5,14 @@ name         = "brewster"
 rust-version = "1.88"
 version      = "0.1.0"
 
+[features]
+# Compile and spawn the embedded HTTP server (dashboard + API endpoints).
+http-server = []
+# Expose a /metrics Prometheus text endpoint; implies http-server.
+prometheus  = ["http-server"]
+# Both features on by default.
+default     = ["http-server", "prometheus"]
+
 [[bin]]
 name = "brewster"
 path = "./src/bin/main.rs"

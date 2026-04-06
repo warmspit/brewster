@@ -1,4 +1,13 @@
 {
   "rust-analyzer.cargo.allTargets": false,
-  "git.ignoreLimitWarning": true
+  "git.ignoreLimitWarning": true,
+  // rust-analyzer check for the firmware crate — must include -Zbuild-std since
+  // it is no_std and core/alloc are not pre-compiled for the Xtensa target.
+  "rust-analyzer.check.overrideCommand": [
+    "cargo", "check",
+    "--package", "brewster",
+    "--target", "xtensa-esp32s3-none-elf",
+    "-Zbuild-std=core,alloc",
+    "--message-format=json"
+  ]
 }

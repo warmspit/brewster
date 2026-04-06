@@ -16,9 +16,7 @@ pub struct Rgb8 {
     pub blue: u8,
 }
 
-fn status_color(temp_c: f32, relay_on: bool) -> Rgb8 {
-    let _ = temp_c;
-
+fn status_color(relay_on: bool) -> Rgb8 {
     if relay_on {
         return Rgb8 {
             red: 10,
@@ -36,7 +34,7 @@ fn status_color(temp_c: f32, relay_on: bool) -> Rgb8 {
 }
 
 fn sensor_fault_color(_error: SensorError) -> Rgb8 {
-    // Green = device alive, red = fault.
+    // Amber: device is alive but sensor has faulted.
     Rgb8 {
         red: 10,
         green: 4,
@@ -55,6 +53,20 @@ pub fn compute_on_steps(pid_output: f32) -> u32 {
     }
 }
 
+fn on_sensor_error(
+    pid: &mut Pid<f32>,
+    relay: &mut Output<'static>,
+    window_step: &mut u32,
+    error: SensorError,
+) -> (Rgb8, bool) {
+    pid.reset_integral_term();
+    relay.set_low();
+    *window_step = 0;
+    let color = sensor_fault_color(error);
+    status::update_error(error, color.red, color.green, color.blue);
+    (color, false)
+}
+
 pub async fn control_step(
     delay: &mut Delay,
     one_wire_pin: &mut Flex<'static>,
@@ -64,7 +76,7 @@ pub async fn control_step(
 ) -> (Rgb8, bool) {
     match sensor::ds18b20_start_conversion(one_wire_pin, delay) {
         Ok(()) => {
-            Timer::after(Duration::from_millis(config::DS18B20_CONVERSION_MS)).await;
+            Timer::after(Duration::from_millis(config::ds18b20_conversion_ms())).await;
 
             match sensor::ds18b20_read_temperature_c(one_wire_pin, delay) {
                 Ok(temp_c) => {
@@ -72,7 +84,7 @@ pub async fn control_step(
                         pid.reset_integral_term();
                         relay.set_low();
                         *window_step = 0;
-                        let color = status_color(temp_c, false);
+                        let color = status_color(false);
                         status::update_success(status::RuntimeSample {
                             temp_c,
                             pid_output: 0.0,
@@ -93,7 +105,7 @@ pub async fn control_step(
                     let cooling_on = *window_step < on_steps;
 
                     relay.set_level(if cooling_on { Level::High } else { Level::Low });
-                    let color = status_color(temp_c, cooling_on);
+                    let color = status_color(cooling_on);
                     status::update_success(status::RuntimeSample {
                         temp_c,
                         pid_output,
@@ -107,23 +119,9 @@ pub async fn control_step(
                     *window_step = (*window_step + 1) % config::SSR_WINDOW_STEPS;
                     (color, cooling_on)
                 }
-                Err(error) => {
-                    pid.reset_integral_term();
-                    relay.set_low();
-                    *window_step = 0;
-                    let color = sensor_fault_color(error);
-                    status::update_error(error, color.red, color.green, color.blue);
-                    (color, false)
-                }
+                Err(error) => on_sensor_error(pid, relay, window_step, error),
             }
         }
-        Err(error) => {
-            pid.reset_integral_term();
-            relay.set_low();
-            *window_step = 0;
-            let color = sensor_fault_color(error);
-            status::update_error(error, color.red, color.green, color.blue);
-            (color, false)
-        }
+        Err(error) => on_sensor_error(pid, relay, window_step, error),
     }
 }
