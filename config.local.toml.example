@@ -15,13 +15,15 @@ STATUS_PRINT_EVERY_SECONDS = "5"
 #   11-bit → 375 ms conversion, 0.125 °C steps  ← default
 #   12-bit → 750 ms conversion, 0.0625 °C steps
 DS18B20_RESOLUTION = "11"
+# SSR_DEADBAND = "0.5"  # Dead zone ±0.25°C around setpoint (default: 0.5 °C)
 NTP_SERVERS = "129.6.15.28,194.58.204.20"
 # Optional fallback when NTP_SERVERS is empty or invalid
 NTP_SERVER = "8.8.8.8"
 
-# Heat SSR deadband in °C (default 0.5). Heating turns on when temp drops
-# more than this amount below the target, and off once temp reaches target.
-# SSR_HEAT_DEADBAND = "0.5"
+# SSR wiring (configurable via [ssr] below; defaults shown):
+#   Cooling SSR → GPIO 12
+#   Heating SSR → GPIO 13
+#   DS18B20 data → GPIO 5  (configured via [[sensors]] below)
 
 # UDP telemetry server (optional).  Set UDP_SERVER_IP to enable.
 # brewster-server listens on port 47890 by default; run it on any LAN host.
@@ -31,6 +33,11 @@ NTP_SERVER = "8.8.8.8"
 
 [device]
 hostname = "brewster"
+
+[ssr]
+cool_pin = 12  # GPIO pin for cooling SSR (default: 12)
+heat_pin = 13  # GPIO pin for heating SSR (default: 13)
+# SSR_DEADBAND = "0.5"  # Dead zone ±0.25°C around setpoint (default: 0.5 °C)
 
 [[sensors]]
 pin = 5

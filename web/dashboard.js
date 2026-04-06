@@ -72,6 +72,9 @@ const updateNtpPill = (synced) => {
 // --- api.js ---
 const HISTORY_LOAD_POINTS  = 10000; // full replay on page load — fetch as many records as the server holds
 const HISTORY_MERGE_POINTS =   120; // only need last ~2 min on each 1-second poll tick
+/// Width of the auto-follow live view. When total data exceeds this duration,
+/// the chart auto-scrolls so the newest data is always at the right edge.
+const LIVE_WINDOW_SECONDS = 3600; // 1 hour
 
 const submitTargetTemperature = async (tempC) => {
   const response = await fetch("/temperature", {
@@ -195,7 +198,13 @@ class Sparkline {
     this._hoverX = null;
     this._elapsedSeconds = null;
     this._rafId = null;
+    this._deadband = 0;
     // Hover is driven externally via setHoverRatio() broadcast from the section-level listener.
+  }
+
+  setDeadband(deadband_c) {
+    this._deadband = Number.isFinite(deadband_c) ? Math.max(0, deadband_c) : 0;
+    this._draw();
   }
 
   setValues(values) {
@@ -321,6 +330,9 @@ class Sparkline {
         if (v > max) max = v;
       }
     }
+    // Add 1 °C buffer to top and bottom so the trace never touches the edge.
+    min -= 1;
+    max += 1;
     const spread = Math.max(0.1, max - min);
 
     const yFor = (v) => {
@@ -435,6 +447,34 @@ class Sparkline {
       ctx.beginPath();
       ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
       ctx.clip();
+
+      // ── Deadband shaded band ──────────────────────────────────────────────
+      // Shade ±(deadband/2) around the target line as a translucent yellow band.
+      if (this._deadband > 0) {
+        const half = this._deadband / 2;
+        ctx.fillStyle = "rgba(247, 215, 116, 0.10)";
+        let bandStarted = false;
+        let bx0 = 0;
+        let prevV = null;
+        const flushBand = (x1, v) => {
+          if (!bandStarted || prevV === null) return;
+          const yTop = yFor(prevV + half);
+          const yBot = yFor(prevV - half);
+          ctx.fillRect(bx0, Math.min(yTop, yBot), x1 - bx0, Math.abs(yBot - yTop));
+        };
+        for (let i = iFirst; i <= iLast; i++) {
+          if (i >= this._targetValues.length) break;
+          const v = this._targetValues[i];
+          const x = xForIdx(i);
+          if (!Number.isFinite(v)) { flushBand(x, prevV); bandStarted = false; prevV = null; continue; }
+          const jumped = prevV !== null && Math.abs(v - prevV) > 0.05;
+          if (!bandStarted || jumped) { flushBand(x, prevV); bx0 = x; bandStarted = true; }
+          prevV = v;
+        }
+        if (bandStarted && prevV !== null) {
+          flushBand(xForIdx(Math.min(iLast, this._targetValues.length - 1)) + 1, prevV);
+        }
+      }
       ctx.lineWidth = 1.5;
       ctx.strokeStyle = "#f7d774";
       ctx.setLineDash([5, 4]);
@@ -628,9 +668,9 @@ class PidChart {
     const plotHeight = Math.max(1, height - plotPadTop - plotPadBottom);
 
     const leftSeries = [
-      { color: "#40c4ff", value: (p) => p.kp },
-      { color: "#ffd740", value: (p) => p.ki },
-      { color: "#e040fb", value: (p) => p.kd },
+      { color: "#40c4ff", value: (p) => p.pid_p_pct },
+      { color: "#ffd740", value: (p) => p.pid_i_pct },
+      { color: "#e040fb", value: (p) => p.pid_d_pct },
     ];
     const rightSeries = [
       { color: "#ff6d00", value: (p) => PidChart._signedOutput(p) },
@@ -653,8 +693,13 @@ class PidChart {
       });
     }
     const leftSpread = Math.max(0.1, leftMax - leftMin);
+    // Add 10% padding above and below the PID term range.
+    const leftPad = leftSpread * 0.10;
+    leftMin -= leftPad;
+    leftMax += leftPad;
+    const leftPaddedSpread = leftMax - leftMin;
     const yForLeft = (v) => {
-      const norm = (v - leftMin) / leftSpread;
+      const norm = (v - leftMin) / leftPaddedSpread;
       return height - plotPadBottom - norm * plotHeight;
     };
     const rightMin = -1;
@@ -678,8 +723,8 @@ class PidChart {
     ctx.lineTo(width - axisPadRight, height - plotPadBottom);
     ctx.stroke();
 
-    const leftTickValues = [leftMax, leftMin + leftSpread / 2, leftMin];
-    const leftDecimals = leftSpread >= 10 ? 0 : leftSpread >= 0.5 ? 1 : 2;
+    const leftTickValues = [leftMax, leftMin + leftPaddedSpread / 2, leftMin];
+    const leftDecimals = leftPaddedSpread >= 10 ? 0 : leftPaddedSpread >= 0.5 ? 1 : 2;
     ctx.font = "12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(230, 241, 255, 0.82)";
     ctx.textAlign = "right";
@@ -787,7 +832,7 @@ class PidChart {
       const signedOutput = PidChart._signedOutput(sample);
       const relayMode = sample.relay_on ? "cool" : sample.heat_on ? "heat" : "off";
       const tip1 = `T+${formatElapsed(Math.round(hoverTime))}`;
-      const tip2 = `kp:${sample.kp.toFixed(2)} ki:${sample.ki.toFixed(2)} kd:${sample.kd.toFixed(2)}`;
+      const tip2 = `P:${sample.pid_p_pct.toFixed(1)}% I:${sample.pid_i_pct.toFixed(1)}% D:${sample.pid_d_pct.toFixed(1)}%`;
       const tip3 = `drv:${signedOutput.toFixed(2)} win:${sample.window_step} on:${sample.on_steps} r:${relayMode}`;
 
       ctx.save();
@@ -843,9 +888,10 @@ let uptimeAtHistoryLoad = null;
 // Set to true after each loadHistoryFromDevice so the first merged point gets a
 // session-boundary gap marker, clearly separating persisted history from live data.
 let sessionGapPending = false;
-// Last valid kp/ki/kd seen (from history or live status). Used to fill gaps
-// when the server status doesn't carry PID gains (UDP packet has no kp/ki/kd).
-let lastKnownPidGains = { kp: 0, ki: 0, kd: 0 };
+// When true, the chart auto-scrolls so the latest data is always at the right
+// edge. Set to false when the user manually zooms/pans; double-clicking any
+// chart canvas re-enables it.
+let liveFollow = true;
 
 const loadHistoryFromDevice = async (sparklines, pidChart) => {
   const response = await fetch(`/history?points=${HISTORY_LOAD_POINTS}`, { cache: "no-store" });
@@ -899,7 +945,8 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
     }
 
     // Extra sensor temps: column 7 → sensor index 1, column 8 → sensor index 2.
-    for (let col = 7; col < point.length; col++) {
+    // Columns 9–11 are pid_p/i/d — stop before them.
+    for (let col = 7; col < Math.min(point.length, 9); col++) {
       const sensorIdx = col - 6;
       const sl = sparklines.get(sensorIdx);
       if (sl) {
@@ -910,9 +957,9 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
 
     pidChart.push({
       target_c: target,
-      kp: 14.0,
-      ki: 0.35,
-      kd: 6.0,
+      pid_p_pct: Number(point[9]) || 0,
+      pid_i_pct: Number(point[10]) || 0,
+      pid_d_pct: Number(point[11]) || 0,
       output_percent: Number(point[3]),
       window_step:   Number(point[4]),
       on_steps:      Number(point[5]),
@@ -926,11 +973,6 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
 
   sparklines.forEach((sl) => sl.setElapsedSeconds(loadedHistoryBaseSeconds));
   pidChart.setElapsedSeconds(loadedHistoryBaseSeconds);
-
-  if (pidChart._values.length > 0) {
-    const last = pidChart._values[pidChart._values.length - 1];
-    if (Number.isFinite(last.kp)) lastKnownPidGains = { kp: last.kp, ki: last.ki, kd: last.kd };
-  }
 };
 
 const mergeHistoryFromDevice = async (sparklines, pidChart) => {
@@ -957,8 +999,9 @@ const mergeHistoryFromDevice = async (sparklines, pidChart) => {
     lastHistorySeq = seq;
     primarySparkline.push(Number(point[1]));
     primarySparkline.pushTarget(Number(point[2]));
-    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2, etc.
-    for (let col = 7; col < point.length; col++) {
+    // Extra sensor temps: column 7 → sensor 1, column 8 → sensor 2.
+    // Columns 9–11 are pid_p/i/d — stop before them.
+    for (let col = 7; col < Math.min(point.length, 9); col++) {
       const sensorIdx = col - 6;
       const sl = sparklines.get(sensorIdx);
       if (sl) {
@@ -968,9 +1011,9 @@ const mergeHistoryFromDevice = async (sparklines, pidChart) => {
     }
     pidChart.push({
       target_c: Number(point[2]),
-      kp: 14.0,
-      ki: 0.35,
-      kd: 6.0,
+      pid_p_pct: Number(point[9]) || 0,
+      pid_i_pct: Number(point[10]) || 0,
+      pid_d_pct: Number(point[11]) || 0,
       output_percent: Number(point[3]),
       window_step: Number(point[4]),
       on_steps: Number(point[5]),
@@ -1049,7 +1092,10 @@ const updateFromStatus = (
         const sensorChart = sparklines.get(sensor.index);
         if (sensorChart) {
           sensorChart.push(sensor.temperature_c);
-          if (sensor.index === 0) sensorChart.pushTarget(data.pid.target_c);
+          if (sensor.index === 0) {
+            sensorChart.pushTarget(data.pid.target_c);
+            sensorChart.setDeadband(data.pid.deadband_c ?? 0);
+          }
         }
       }
     });
@@ -1094,14 +1140,11 @@ const updateFromStatus = (
   }
 
   if (collecting) {
-    if (Number.isFinite(data.pid.kp)) {
-      lastKnownPidGains = { kp: data.pid.kp, ki: data.pid.ki, kd: data.pid.kd };
-    }
     const sample = {
       target_c: data.pid.target_c,
-      kp: lastKnownPidGains.kp,
-      ki: lastKnownPidGains.ki,
-      kd: lastKnownPidGains.kd,
+      pid_p_pct: data.pid.pid_p_pct ?? 0,
+      pid_i_pct: data.pid.pid_i_pct ?? 0,
+      pid_d_pct: data.pid.pid_d_pct ?? 0,
       output_percent: data.pid.output_percent,
       window_step: data.pid.window_step,
       on_steps: data.pid.on_steps,
@@ -1111,6 +1154,16 @@ const updateFromStatus = (
     pidCharts.forEach((pidChart) => {
       pidChart.push(sample);
     });
+  }
+
+  // Auto-scroll: when live-following, keep LIVE_WINDOW_SECONDS pinned to the
+  // right edge. The already-scheduled RAF picks up the new zoom automatically.
+  if (collecting && liveFollow) {
+    const totalElapsed = loadedHistoryBaseSeconds +
+      (uptimeAtHistoryLoad !== null ? Math.max(0, data.system.uptime_s - uptimeAtHistoryLoad) : 0);
+    if (totalElapsed > LIVE_WINDOW_SECONDS) {
+      setZoomWindow(Math.max(0, 1 - LIVE_WINDOW_SECONDS / totalElapsed), 1);
+    }
   }
 
   setText("ip", data.system.ip || "--");
@@ -1326,6 +1379,7 @@ const start = () => {
   section.addEventListener("mouseleave", () => { lastHoverRatio = null; broadcastHoverRatio(null); });
 
   const applyZoom = (pivotRatio, factor) => {
+    liveFollow = false;
     const span = zoomEnd - zoomStart;
     const newSpan = Math.max(0.02, Math.min(1, span * factor));
     const center = zoomStart + pivotRatio * span;
@@ -1338,6 +1392,7 @@ const start = () => {
   };
 
   const applyPan = (delta) => {
+    liveFollow = false;
     const span = zoomEnd - zoomStart;
     const newStart = Math.max(0, Math.min(1 - span, zoomStart + delta * span));
     setZoomWindow(newStart, newStart + span);
@@ -1356,7 +1411,16 @@ const start = () => {
   };
 
   const resetZoom = () => {
-    setZoomWindow(0, 1);
+    liveFollow = true;
+    // Snap immediately to the live window (or full range if data is shorter).
+    const elapsed = loadedHistoryBaseSeconds +
+      (uptimeAtHistoryLoad !== null && lastUptimeSeconds !== null
+        ? Math.max(0, lastUptimeSeconds - uptimeAtHistoryLoad) : 0);
+    if (elapsed > LIVE_WINDOW_SECONDS) {
+      setZoomWindow(Math.max(0, 1 - LIVE_WINDOW_SECONDS / elapsed), 1);
+    } else {
+      setZoomWindow(0, 1);
+    }
     sparklines.forEach((sparkline) => sparkline.redraw());
     pidCharts.forEach((chart) => chart.redraw());
   };

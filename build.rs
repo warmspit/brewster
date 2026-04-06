@@ -4,9 +4,75 @@
 fn main() {
     inject_local_wifi_env();
     generate_sensor_config();
+    generate_ssr_config();
     linker_be_nice();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+fn generate_ssr_config() {
+    let local_cfg = "config.local.toml";
+    println!("cargo:rerun-if-changed={local_cfg}");
+
+    let contents = std::fs::read_to_string(local_cfg).unwrap_or_default();
+    let (cool_pin, heat_pin) = extract_ssr_pins(&contents);
+
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let output = std::path::Path::new(&out_dir).join("ssr_config.rs");
+
+    let generated = format!(
+        "macro_rules! ssr_cool_gpio {{\n    ($p:expr) => {{ $p.GPIO{cool_pin} }};\n}}\n\
+         macro_rules! ssr_heat_gpio {{\n    ($p:expr) => {{ $p.GPIO{heat_pin} }};\n}}\n\
+         pub const SSR_COOL_PIN_NUM: u8 = {cool_pin};\n\
+         pub const SSR_HEAT_PIN_NUM: u8 = {heat_pin};\n",
+    );
+
+    std::fs::write(output, generated).expect("failed to write ssr_config.rs");
+}
+
+fn extract_ssr_pins(contents: &str) -> (u8, u8) {
+    let mut cool_pin: u8 = 12;
+    let mut heat_pin: u8 = 13;
+    let mut in_ssr = false;
+
+    for line in contents.lines() {
+        let without_comment = line.split('#').next().unwrap_or("");
+        let trimmed = without_comment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "[ssr]" {
+            in_ssr = true;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_ssr = false;
+            continue;
+        }
+        if !in_ssr {
+            continue;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = lhs.trim();
+        let value = rhs.trim().trim_matches('"');
+        match key {
+            "cool_pin" => {
+                if let Ok(v) = value.parse() {
+                    cool_pin = v;
+                }
+            }
+            "heat_pin" => {
+                if let Ok(v) = value.parse() {
+                    heat_pin = v;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (cool_pin, heat_pin)
 }
 
 fn generate_sensor_config() {
@@ -187,7 +253,7 @@ fn inject_local_wifi_env() {
         "UDP_SERVER_IP",
         "UDP_SERVER_PORT",
         "DS18B20_RESOLUTION",
-        "SSR_HEAT_DEADBAND",
+        "SSR_DEADBAND",
     ] {
         if let Some(value) = extract_env_value(&contents, key) {
             println!("cargo:rustc-env={key}={value}");

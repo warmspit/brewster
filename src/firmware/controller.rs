@@ -108,6 +108,9 @@ pub async fn control_step(
                             led_blue: color.blue,
                             pid_window_step: 0,
                             pid_on_steps: 0,
+                            pid_p_pct: 0.0,
+                            pid_i_pct: 0.0,
+                            pid_d_pct: 0.0,
                         });
                         return (color, false);
                     }
@@ -135,12 +138,22 @@ pub async fn control_step(
                     // work to do; if it has wound up positively from an earlier
                     // cooling run it will suppress heating for minutes.  Clear it
                     // the moment we cross below target so cooling turns off promptly.
+                    //
+                    // Deadband: within ±(deadband/2) of the setpoint neither relay
+                    // activates — prevents both PIDs fighting near the setpoint.
                     let control_error = temp_c - target_c; // positive = above target
+                    let half_band = config::ssr_deadband_c() / 2.0;
                     if control_error < 0.0 {
                         pid.reset_integral_term();
                     }
-                    pid.setpoint = -target_c;
-                    let pid_output = pid.next_control_output(-temp_c).output.clamp(0.0, 100.0);
+                    let (pid_output, cool_p, cool_i, cool_d) = if control_error > half_band {
+                        pid.setpoint = -target_c;
+                        let co = pid.next_control_output(-temp_c);
+                        (co.output.clamp(0.0, 100.0), co.p, co.i, co.d)
+                    } else {
+                        pid.reset_integral_term();
+                        (0.0, 0.0, 0.0, 0.0)
+                    };
                     let cool_on_steps = compute_on_steps(pid_output);
                     let cooling_on = *window_step < cool_on_steps;
                     relay.set_level(if cooling_on { Level::High } else { Level::Low });
@@ -151,30 +164,49 @@ pub async fn control_step(
                     if control_error > 0.0 {
                         heat_pid.reset_integral_term();
                     }
-                    heat_pid.setpoint = target_c;
-                    let heat_pid_output = heat_pid
-                        .next_control_output(temp_c)
-                        .output
-                        .clamp(0.0, 100.0);
+                    let (heat_pid_output, heat_p, heat_i, heat_d) = if control_error < -half_band {
+                        heat_pid.setpoint = target_c;
+                        let co = heat_pid.next_control_output(temp_c);
+                        (co.output.clamp(0.0, 100.0), co.p, co.i, co.d)
+                    } else {
+                        heat_pid.reset_integral_term();
+                        (0.0, 0.0, 0.0, 0.0)
+                    };
                     let heat_on_steps = compute_on_steps(heat_pid_output);
                     // Never heat while the cooling relay is active.
                     let heat_on = !cooling_on && *heat_window_step < heat_on_steps;
                     heat_relay.set_level(if heat_on { Level::High } else { Level::Low });
 
-                    // Transmit the active relay's commanded duty cycle so the
-                    // dashboard can display true duty cycle for both modes.
-                    let (active_pid_output, active_window_step, active_on_steps) =
-                        if cool_on_steps > 0 {
-                            (pid_output, *window_step as u8, cool_on_steps as u8)
-                        } else if heat_on_steps > 0 {
-                            (
-                                heat_pid_output,
-                                *heat_window_step as u8,
-                                heat_on_steps as u8,
-                            )
-                        } else {
-                            (0.0, 0u8, 0u8)
-                        };
+                    // Transmit the active relay's commanded duty cycle and PID
+                    // term contributions so the dashboard can diagnose the loop.
+                    let (
+                        active_pid_output,
+                        active_window_step,
+                        active_on_steps,
+                        active_p,
+                        active_i,
+                        active_d,
+                    ) = if cool_on_steps > 0 {
+                        (
+                            pid_output,
+                            *window_step as u8,
+                            cool_on_steps as u8,
+                            cool_p,
+                            cool_i,
+                            cool_d,
+                        )
+                    } else if heat_on_steps > 0 {
+                        (
+                            heat_pid_output,
+                            *heat_window_step as u8,
+                            heat_on_steps as u8,
+                            heat_p,
+                            heat_i,
+                            heat_d,
+                        )
+                    } else {
+                        (0.0, 0u8, 0u8, 0.0, 0.0, 0.0)
+                    };
 
                     let color = status_color(cooling_on || heat_on);
                     status::update_success(status::RuntimeSample {
@@ -187,6 +219,9 @@ pub async fn control_step(
                         led_blue: color.blue,
                         pid_window_step: active_window_step,
                         pid_on_steps: active_on_steps,
+                        pid_p_pct: active_p,
+                        pid_i_pct: active_i,
+                        pid_d_pct: active_d,
                     });
                     *window_step = (*window_step + 1) % config::SSR_WINDOW_STEPS;
                     *heat_window_step = (*heat_window_step + 1) % config::SSR_WINDOW_STEPS;

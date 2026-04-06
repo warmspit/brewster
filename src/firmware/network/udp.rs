@@ -18,7 +18,7 @@
 //!
 //! # Telemetry wire format
 //!
-//! See `server/src/packet.rs` — 53 bytes, magic `b"BREW"` + version byte.
+//! See `server/src/packet.rs` — 57 bytes, magic `b"BREW"` + version byte.
 
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
@@ -35,8 +35,8 @@ use crate::firmware::{config, status};
 const PACKET_MAGIC: [u8; 4] = *b"BREW";
 /// Increment this whenever the wire layout changes so the server can detect
 /// format mismatches and drop stale packets cleanly.
-const PACKET_VERSION: u8 = 3;
-const PACKET_SIZE: usize = 53;
+const PACKET_VERSION: u8 = 5;
+const PACKET_SIZE: usize = 57;
 const TEMP_NONE: i16 = i16::MAX;
 
 /// Port the server broadcasts beacons TO; the firmware listens on this port.
@@ -349,6 +349,10 @@ fn build_packet() -> [u8; PACKET_SIZE] {
     buf[47] = status::sensor_status(2);
     buf[48..52].copy_from_slice(&ip);
     buf[52] = sensor_count;
+    buf[53] = (config::ssr_deadband_c() * 100.0).clamp(0.0, 255.0) as u8;
+    buf[54] = snap.pid_p_pct as u8;
+    buf[55] = snap.pid_i_pct as u8;
+    buf[56] = snap.pid_d_pct as u8;
     buf
 }
 

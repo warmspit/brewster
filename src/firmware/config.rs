@@ -38,6 +38,20 @@ pub const SSR_WINDOW_STEPS: u32 = 10;
 pub const BOOT_OK_DISPLAY_MS: u64 = 2_000;
 pub const STATUS_PRINT_EVERY_SECONDS: Option<&str> = option_env!("STATUS_PRINT_EVERY_SECONDS");
 
+/// Symmetric dead zone around the setpoint in °C.
+/// Within ±(deadband/2) of the target neither relay activates, preventing
+/// both PIDs from fighting each other near the setpoint.
+/// Configured via `SSR_DEADBAND` in `config.local.toml`.  Default: 0.5 °C.
+const SSR_DEADBAND_CONFIG: Option<&str> = option_env!("SSR_DEADBAND");
+const SSR_DEADBAND_DEFAULT: f32 = 0.5;
+
+pub fn ssr_deadband_c() -> f32 {
+    SSR_DEADBAND_CONFIG
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|&v| v >= 0.0)
+        .unwrap_or(SSR_DEADBAND_DEFAULT)
+}
+
 pub const PID_OUTPUT_LIMIT_PERCENT: f32 = 100.0;
 pub const PID_KP: f32 = 14.0;
 pub const PID_KI: f32 = 0.35;

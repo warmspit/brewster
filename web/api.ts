@@ -18,14 +18,15 @@ export type StatusPayload = {
   pid: {
     target_c: number;
     target_f: number;
-    kp: number;
-    ki: number;
-    kd: number;
+    pid_p_pct: number;
+    pid_i_pct: number;
+    pid_d_pct: number;
     output_percent: number;
     window_step: number;
     on_steps: number;
     relay_on: boolean;
     heat_on?: boolean;
+    deadband_c?: number;
   };
   system: {
     ip: string;
@@ -49,9 +50,9 @@ export type StatusPayload = {
 
 export type PidSample = {
   target_c: number;
-  kp: number;
-  ki: number;
-  kd: number;
+  pid_p_pct: number;
+  pid_i_pct: number;
+  pid_d_pct: number;
   output_percent: number;
   window_step: number;
   on_steps: number;
@@ -62,6 +63,8 @@ export type PidSample = {
 export type HistoryPayload = {
   sample_interval_s: number;
   total_samples: number;
+  // Each inner array: [seq, temp_c, target_c, output_pct, window_step, on_steps, relay_on,
+  //                    extra1, extra2, pid_p_pct, pid_i_pct, pid_d_pct, t_s, gap_before]
   points: number[][];
 };
 

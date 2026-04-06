@@ -12,6 +12,8 @@
 
 extern crate alloc;
 
+include!(concat!(env!("OUT_DIR"), "/ssr_config.rs"));
+
 #[path = "../firmware/mod.rs"]
 mod firmware;
 
@@ -141,12 +143,14 @@ async fn main(spawner: Spawner) -> ! {
 
     println!("{} booting", device_hostname());
     println!(
-        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr-cool:GPIO12, ssr-heat:GPIO13, led:GPIO48}}",
+        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr-cool:GPIO{}, ssr-heat:GPIO{}, led:GPIO48}}",
         status::get_target_temp_c(),
         status::temp_probe_name(),
         PID_KP,
         PID_KI,
         PID_KD,
+        SSR_COOL_PIN_NUM,
+        SSR_HEAT_PIN_NUM,
     );
 
     let one_wire_pin = sensor::configure_one_wire_pin(Flex::new(peripherals.GPIO5));
@@ -167,8 +171,16 @@ async fn main(spawner: Spawner) -> ! {
         ),
     }
 
-    let mut relay = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
-    let mut heat_relay = Output::new(peripherals.GPIO13, Level::Low, OutputConfig::default());
+    let mut relay = Output::new(
+        ssr_cool_gpio!(peripherals),
+        Level::Low,
+        OutputConfig::default(),
+    );
+    let mut heat_relay = Output::new(
+        ssr_heat_gpio!(peripherals),
+        Level::Low,
+        OutputConfig::default(),
+    );
 
     let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
     let led_config = TxChannelConfig::default()
