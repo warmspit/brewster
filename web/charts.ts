@@ -71,6 +71,9 @@ export class Sparkline {
   private readonly values: number[] = [];
   private targetValues: number[] = [];
   private gapBefore: Set<number> = new Set();
+  private sessionBoundary: Set<number> = new Set();
+  private pendingGap: boolean = false;
+  private pendingSessionBoundary: boolean = false;
   private hoverX: number | null = null;
   private elapsedSeconds: number | null = null;
   private rafId: number | null = null;
@@ -129,15 +132,24 @@ export class Sparkline {
     }
   }
 
-  /** Mark the next pushed value as the start of a new data segment (draws as a gap). */
+  /** Mark the next pushed value as the start of a new data segment (draws as a red gap). */
   markGapBeforeNext(): void {
     this.pendingGap = true;
+  }
+
+  /** Mark the next pushed value as a session boundary (draws as a dim grey dashed line). */
+  markSessionBoundaryBeforeNext(): void {
+    this.pendingSessionBoundary = true;
   }
 
   push(value: number): void {
     if (this.pendingGap) {
       this.gapBefore.add(this.values.length);
       this.pendingGap = false;
+    }
+    if (this.pendingSessionBoundary) {
+      this.sessionBoundary.add(this.values.length);
+      this.pendingSessionBoundary = false;
     }
     this.values.push(value);
     this.draw();
@@ -155,6 +167,8 @@ export class Sparkline {
   clear(): void {
     this.values.length = 0;
     this.targetValues.length = 0;
+    this.gapBefore.clear();
+    this.sessionBoundary.clear();
     this.draw();
   }
 
@@ -273,13 +287,29 @@ export class Sparkline {
     let segStart = iFirst;
     for (let i = iFirst + 1; i <= iLast; i++) {
       if (this.gapBefore.has(i)) {
-        // Draw run up to the gap end in normal color, then the gap-crossing segment in red.
         drawSegment(segStart, i - 1, false);
         drawSegment(i - 1, i, true);
         segStart = i;
       }
     }
     drawSegment(segStart, iLast, false);
+
+    // Draw dim grey dashed verticals at session boundaries.
+    if (this.sessionBoundary.size > 0) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(180, 200, 220, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      for (const bi of this.sessionBoundary) {
+        if (bi < iFirst || bi > iLast) continue;
+        const x = xForIdx(bi);
+        ctx.beginPath();
+        ctx.moveTo(x, plotPadTop);
+        ctx.lineTo(x, height - plotPadBottom);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
 
     if (this.targetValues.length > 1) {
       ctx.save();

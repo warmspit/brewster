@@ -37,13 +37,17 @@ hostname = "brewster"
 [ssr]
 cool_pin = 12  # GPIO pin for cooling SSR (default: 12)
 heat_pin = 13  # GPIO pin for heating SSR (default: 13)
-# SSR_DEADBAND = "0.5"  # Dead zone ±0.25°C around setpoint (default: 0.5 °C)
+SSR_DEADBAND = "0.5"  # Dead zone ±0.25°C around setpoint (default: 0.5 °C)
 
 [[sensors]]
 pin = 5
-name = "probe-1"
+name = "Freezer"
+control = true   # This is the sensor the PID uses if true
 
-# Add more probes by repeating [[sensors]]
-# [[sensors]]
-# pin = 6
-# name = "probe-2"
+ [[sensors]]
+ pin = 6
+ name = "Thermal Well"
+
+ [[sensors]]
+ pin = 6
+ name = "Ambient"

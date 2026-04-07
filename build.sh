@@ -94,5 +94,17 @@ fi
 if [[ $RUN_SERVER -eq 1 ]]; then
   echo "==> server: starting"
   export WEB_DIR="${WEB_DIR:-$SCRIPT_DIR/web}"
+  # Extract sensor names from config.local.toml and pass them to the server.
+  # Reads all `name = "..."` lines inside [[sensors]] blocks, joins with comma.
+  if [[ -z "${SENSOR_NAMES:-}" && -f "$SCRIPT_DIR/config.local.toml" ]]; then
+    SENSOR_NAMES=$(awk '
+      /^\[\[sensors\]\]/ { in_sensor=1; next }
+      /^\[/ && !/^\[\[sensors\]\]/ { in_sensor=0 }
+      in_sensor && /^name[[:space:]]*=/ {
+        gsub(/.*=[[:space:]]*"/, ""); gsub(/".*/, ""); printf "%s,", $0
+      }
+    ' "$SCRIPT_DIR/config.local.toml" | sed 's/,$//')
+    export SENSOR_NAMES
+  fi
   exec "$SCRIPT_DIR/server/target/aarch64-apple-darwin/release/brewster-server"
 fi
