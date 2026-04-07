@@ -1138,6 +1138,12 @@ const updateFromStatus = (
     }
   }
 
+  // Detect device reboot before updating lastUptimeSeconds: if uptime jumped back
+  // to near zero, reset lastHistorySeq so new low-seq packets are treated as fresh.
+  const liveUptime = data.system.uptime_s ?? 0;
+  if (lastUptimeSeconds !== null && liveUptime < lastUptimeSeconds - 30) {
+    lastHistorySeq = -1;
+  }
   lastUptimeSeconds = data.system.uptime_s;
   if (collecting) {
     if (uptimeAtHistoryLoad === null) uptimeAtHistoryLoad = data.system.uptime_s;
@@ -1272,16 +1278,14 @@ const updateFromStatus = (
     });
   }
 
-  // Auto-scroll: when live-following, keep LIVE_WINDOW_SECONDS pinned to the
-  // right edge. The already-scheduled RAF picks up the new zoom automatically.
-  // Suppress auto-scroll when the view is still full-range [0,1] after a history
-  // load — let the user see their full history. Auto-scroll resumes once they
-  // manually pan or zoom into a partial view (zoomStart > 0).
-  if (collecting && liveFollow) {
+  // Auto-scroll: when live-following and the user has panned into a partial window,
+  // keep LIVE_WINDOW_SECONDS pinned to the right edge.
+  // When zoomStart == 0 (full-range view), new data is already visible at the right
+  // edge as it arrives — no repositioning needed and none is done.
+  if (collecting && liveFollow && zoomStart > 0.001) {
     const totalElapsed = loadedHistoryBaseSeconds +
       (uptimeAtHistoryLoad !== null ? Math.max(0, data.system.uptime_s - uptimeAtHistoryLoad) : 0);
-    const suppressAutoScroll = loadedHistoryBaseSeconds > 0 && zoomStart < 0.001;
-    if (!suppressAutoScroll && totalElapsed > LIVE_WINDOW_SECONDS) {
+    if (totalElapsed > LIVE_WINDOW_SECONDS) {
       setZoomWindow(Math.max(0, 1 - LIVE_WINDOW_SECONDS / totalElapsed), 1);
     }
   }
