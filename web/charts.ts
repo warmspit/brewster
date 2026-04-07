@@ -290,9 +290,6 @@ export class Sparkline {
         drawSegment(segStart, i - 1, false);
         drawSegment(i - 1, i, true);
         segStart = i;
-      } else if (this.sessionBoundary.has(i)) {
-        drawSegment(segStart, i - 1, false);
-        segStart = i;
       }
     }
     drawSegment(segStart, iLast, false);

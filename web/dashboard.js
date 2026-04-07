@@ -194,7 +194,9 @@ class Sparkline {
     this._values = [];
     this._targetValues = [];
     this._gapBefore = new Set();
+    this._sessionBoundary = new Set();
     this._pendingGap = false;
+    this._pendingSessionBoundary = false;
     this._hoverX = null;
     this._elapsedSeconds = null;
     this._rafId = null;
@@ -224,6 +226,10 @@ class Sparkline {
 
   markGapBeforeNext() {
     this._pendingGap = true;
+  }
+
+  markSessionBoundaryBeforeNext() {
+    this._pendingSessionBoundary = true;
   }
 
   setHoverRatio(ratio) {
@@ -258,6 +264,10 @@ class Sparkline {
       this._gapBefore.add(this._values.length);
       this._pendingGap = false;
     }
+    if (this._pendingSessionBoundary) {
+      this._sessionBoundary.add(this._values.length);
+      this._pendingSessionBoundary = false;
+    }
     this._values.push(value);
     this._draw();
   }
@@ -274,6 +284,10 @@ class Sparkline {
   clear() {
     this._values.length = 0;
     this._targetValues.length = 0;
+    this._gapBefore.clear();
+    this._sessionBoundary.clear();
+    this._pendingGap = false;
+    this._pendingSessionBoundary = false;
     this._draw();
   }
 
@@ -396,7 +410,7 @@ class Sparkline {
       let sum = 0, count = 0;
       for (let k = i - SMOOTH_HALF; k <= i + SMOOTH_HALF; k++) {
         if (k < 0 || k >= n) continue;
-        // Don't average across a gap boundary.
+        // Don't average across a real data gap.
         if (k > i && this._gapBefore.has(k)) break;
         if (k < i) {
           let crossesGap = false;
@@ -439,6 +453,21 @@ class Sparkline {
         ctx.lineTo(x, height - plotPadBottom);
         ctx.stroke();
       }
+    }
+    // Draw grey dashed vertical marks at session-reload boundaries.
+    if (this._sessionBoundary.size > 0) {
+      ctx.strokeStyle = "rgba(180, 200, 220, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      for (const si of this._sessionBoundary) {
+        if (si < iFirst || si > iLast) continue;
+        const x = xForIdx(si);
+        ctx.beginPath();
+        ctx.moveTo(x, plotPadTop);
+        ctx.lineTo(x, height - plotPadBottom);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
     }
     ctx.restore();
 
@@ -587,7 +616,13 @@ class PidChart {
     this._hoverX = null;
     this._elapsedSeconds = null;
     this._rafId = null;
+    this._sessionBoundary = new Set();
+    this._pendingSessionBoundary = false;
     // Hover is driven externally via setHoverRatio() broadcast from the section-level listener.
+  }
+
+  markSessionBoundaryBeforeNext() {
+    this._pendingSessionBoundary = true;
   }
 
   setValues(values) {
@@ -628,12 +663,18 @@ class PidChart {
   }
 
   push(sample) {
+    if (this._pendingSessionBoundary) {
+      this._sessionBoundary.add(this._values.length);
+      this._pendingSessionBoundary = false;
+    }
     this._values.push(sample);
     this._draw();
   }
 
   clear() {
     this._values.length = 0;
+    this._sessionBoundary.clear();
+    this._pendingSessionBoundary = false;
     this._draw();
   }
 
@@ -822,6 +863,27 @@ class PidChart {
     });
     ctx.restore();
 
+    // Draw grey dashed vertical marks at session-reload boundaries.
+    if (this._sessionBoundary.size > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(axisPadLeft, plotPadTop, plotWidth, plotHeight);
+      ctx.clip();
+      ctx.strokeStyle = "rgba(180, 200, 220, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      for (const si of this._sessionBoundary) {
+        if (si < iFirst || si > iLast) continue;
+        const x = xForIdx(si);
+        ctx.beginPath();
+        ctx.moveTo(x, plotPadTop);
+        ctx.lineTo(x, height - plotPadBottom);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
     if (this._hoverX !== null && this._values.length > 0) {
       const clampedX = Math.max(axisPadLeft, Math.min(axisPadLeft + plotWidth, this._hoverX));
       const ratio = (clampedX - axisPadLeft) / plotWidth;
@@ -893,7 +955,7 @@ let sessionGapPending = false;
 // chart canvas re-enables it.
 let liveFollow = true;
 
-const loadHistoryFromDevice = async (sparklines, pidChart) => {
+const loadHistoryFromDevice = async (sparklines, pidChart, ensureTemperatureCharts) => {
   const response = await fetch(`/history?points=${HISTORY_LOAD_POINTS}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
@@ -907,6 +969,27 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
   pidChart.clear();
   lastHistorySeq = -1;
   historyDropCount = 0;
+
+  // Pre-scan up to 100 points to detect which extra sensor columns (7, 8) have
+  // data. Create those sparkline cards NOW — before the replay and before the
+  // first live poll — so ensureTemperatureCharts won't insert new DOM nodes on
+  // the first poll (which would cause the brief layout shift the user sees).
+  const detectedSensorIndices = new Set();
+  for (let i = 0; i < Math.min(points.length, 100); i++) {
+    const pt = points[i];
+    if (!Array.isArray(pt)) continue;
+    for (let col = 7; col < Math.min(pt.length, 9); col++) {
+      if (pt[col] != null) detectedSensorIndices.add(col - 6);
+    }
+    if (detectedSensorIndices.size === 2) break; // found both possible extras
+  }
+  if (detectedSensorIndices.size > 0) {
+    const syntheticSensors = [{ index: 0, name: "" }]; // index 0 already exists
+    detectedSensorIndices.forEach((idx) => {
+      syntheticSensors.push({ index: idx, name: `probe-${idx + 1}` });
+    });
+    ensureTemperatureCharts(syntheticSensors);
+  }
 
   const sampleIntervalS =
     Number.isFinite(Number(payload.sample_interval_s)) && Number(payload.sample_interval_s) > 0
@@ -963,10 +1046,12 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
       window_step:   Number(point[4]),
       on_steps:      Number(point[5]),
       relay_on:      Number(point[6]) !== 0,
+      heat_on: point.length > 14
+        ? Number(point[14]) !== 0
+        : (!Number(point[6]) && Number(point[5]) > 0 && Number(point[4]) < Number(point[5])),
     });
   });
 
-  // Compute elapsed span from actual wall-clock timestamps (col 12 = t_s) so the
   // x-axis does not shift when live points are appended after a history load.
   // Fall back to pointCount × sampleIntervalS if t_s is unavailable.
   loadedHistoryBaseSeconds =
@@ -975,6 +1060,10 @@ const loadHistoryFromDevice = async (sparklines, pidChart) => {
       : Math.max(0, pointCount - 1) * sampleIntervalS;
   uptimeAtHistoryLoad = null; // reset; captured on next updateFromStatus call
   sessionGapPending = true;  // gap marker inserted before first new live point
+
+  // Start at full history range so the user sees all data after a reload.
+  // liveFollow remains true so auto-scroll resumes on the next poll tick.
+  setZoomWindow(0, 1);
 
   sparklines.forEach((sl) => sl.setElapsedSeconds(loadedHistoryBaseSeconds));
   pidChart.setElapsedSeconds(loadedHistoryBaseSeconds);
@@ -1023,6 +1112,9 @@ const mergeHistoryFromDevice = async (sparklines, pidChart) => {
       window_step: Number(point[4]),
       on_steps: Number(point[5]),
       relay_on: Number(point[6]) !== 0,
+      heat_on: point.length > 14
+        ? Number(point[14]) !== 0
+        : (!Number(point[6]) && Number(point[5]) > 0 && Number(point[4]) < Number(point[5])),
     });
   });
 };
@@ -1086,6 +1178,19 @@ const updateFromStatus = (
   if (collecting && sessionGapPending) {
     sessionGapPending = false;
     sparklines.forEach((sl) => sl.markSessionBoundaryBeforeNext());
+    pidCharts.forEach((c) => c.markSessionBoundaryBeforeNext());
+  }
+
+  // Only push chart data when this is a genuinely new packet — one whose seq is
+  // ahead of what mergeHistoryFromDevice already pushed. Without this guard,
+  // mergeHistoryFromDevice pushes seq S (with target T_old from history), then
+  // updateFromStatus pushes the same seq S again (with target T_new from /status),
+  // producing duplicate points with different target values that look like rapid
+  // target oscillations whenever a new setpoint is applied.
+  const liveSeq = data.system.seq != null ? Number(data.system.seq) : null;
+  const freshPacket = liveSeq === null || liveSeq > lastHistorySeq;
+  if (freshPacket && liveSeq !== null) {
+    lastHistorySeq = liveSeq;
   }
 
   if (Array.isArray(data.sensors)) {
@@ -1093,13 +1198,19 @@ const updateFromStatus = (
       setTempProbeLabel(sensor.index, sensor.name);
       setPidProbeLabel(sensor.index, sensor.name);
 
-      if (collecting && sensor.temperature_c !== null) {
+      if (sensor.index === 0) {
+        const sensorChart = sparklines.get(0);
+        if (sensorChart) {
+          sensorChart.setDeadband(data.pid.deadband_c ?? 0);
+        }
+      }
+
+      if (collecting && freshPacket && sensor.temperature_c !== null) {
         const sensorChart = sparklines.get(sensor.index);
         if (sensorChart) {
           sensorChart.push(sensor.temperature_c);
           if (sensor.index === 0) {
             sensorChart.pushTarget(data.pid.target_c);
-            sensorChart.setDeadband(data.pid.deadband_c ?? 0);
           }
         }
       }
@@ -1144,7 +1255,7 @@ const updateFromStatus = (
     }
   }
 
-  if (collecting) {
+  if (collecting && freshPacket) {
     const sample = {
       target_c: data.pid.target_c,
       pid_p_pct: data.pid.pid_p_pct ?? 0,
@@ -1163,10 +1274,14 @@ const updateFromStatus = (
 
   // Auto-scroll: when live-following, keep LIVE_WINDOW_SECONDS pinned to the
   // right edge. The already-scheduled RAF picks up the new zoom automatically.
+  // Suppress auto-scroll when the view is still full-range [0,1] after a history
+  // load — let the user see their full history. Auto-scroll resumes once they
+  // manually pan or zoom into a partial view (zoomStart > 0).
   if (collecting && liveFollow) {
     const totalElapsed = loadedHistoryBaseSeconds +
       (uptimeAtHistoryLoad !== null ? Math.max(0, data.system.uptime_s - uptimeAtHistoryLoad) : 0);
-    if (totalElapsed > LIVE_WINDOW_SECONDS) {
+    const suppressAutoScroll = loadedHistoryBaseSeconds > 0 && zoomStart < 0.001;
+    if (!suppressAutoScroll && totalElapsed > LIVE_WINDOW_SECONDS) {
       setZoomWindow(Math.max(0, 1 - LIVE_WINDOW_SECONDS / totalElapsed), 1);
     }
   }
@@ -1416,16 +1531,10 @@ const start = () => {
   };
 
   const resetZoom = () => {
-    liveFollow = true;
-    // Snap immediately to the live window (or full range if data is shorter).
-    const elapsed = loadedHistoryBaseSeconds +
-      (uptimeAtHistoryLoad !== null && lastUptimeSeconds !== null
-        ? Math.max(0, lastUptimeSeconds - uptimeAtHistoryLoad) : 0);
-    if (elapsed > LIVE_WINDOW_SECONDS) {
-      setZoomWindow(Math.max(0, 1 - LIVE_WINDOW_SECONDS / elapsed), 1);
-    } else {
-      setZoomWindow(0, 1);
-    }
+    // Show full history without auto-scroll fighting it. New data still appears
+    // at the right edge naturally since zoomEnd=1 always tracks the last point.
+    liveFollow = false;
+    setZoomWindow(0, 1);
     sparklines.forEach((sparkline) => sparkline.redraw());
     pidCharts.forEach((chart) => chart.redraw());
   };
@@ -1564,8 +1673,19 @@ const start = () => {
   const targetInput = byId("target-input");
   const targetSubmit = byId("target-submit");
 
+  // Snapshot the raw input value on pointerdown, before the click shifts focus
+  // away from the input. Without this, a poll firing between mousedown and click
+  // can overwrite targetInput.value (because activeElement is now the button),
+  // causing applyTarget to read the server's current target instead of the user's.
+  let pendingTargetRaw = null;
+  targetSubmit.addEventListener("pointerdown", () => {
+    pendingTargetRaw = targetInput.value;
+  });
+
   const applyTarget = async () => {
-    const parsed = Number.parseFloat(targetInput.value);
+    const raw = pendingTargetRaw ?? targetInput.value;
+    pendingTargetRaw = null;
+    const parsed = Number.parseFloat(raw);
     if (!Number.isFinite(parsed)) {
       setTargetFeedback("Enter a valid number", "error");
       return;
@@ -1606,7 +1726,7 @@ const start = () => {
     }
   });
 
-  loadHistoryFromDevice(sparklines, primaryPidChart)
+  loadHistoryFromDevice(sparklines, primaryPidChart, ensureTemperatureCharts)
     .catch((error) => {
       const msg = error instanceof TypeError ? "No link \u2014 retrying\u2026" : `History load failed: ${String(error)}`;
       setText("updated", msg);

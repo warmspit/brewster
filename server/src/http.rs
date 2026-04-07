@@ -229,7 +229,7 @@ struct HistoryJson {
     sample_interval_s: u32,
     total_samples: u32,
     // Each point: [seq, temp_c, target_c, output_pct, window_step, on_steps, relay_on,
-    //              extra1, extra2, pid_p_pct, pid_i_pct, pid_d_pct, t_s, gap_before]
+    //              extra1, extra2, pid_p_pct, pid_i_pct, pid_d_pct, t_s, gap_before, heat_on]
     points: Vec<serde_json::Value>,
 }
 
@@ -272,6 +272,7 @@ async fn get_history(
                 p.pid_d_pct,
                 p.t_s, // col 12: wall-clock unix seconds
                 gap,   // col 13: 1 if real data gap precedes this point
+                p.heat_on as i32, // col 14: 1 if heat relay was active
             ])
         })
         .collect();
