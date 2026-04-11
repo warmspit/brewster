@@ -13,11 +13,11 @@ use crate::firmware::shared;
 
 const NTP_PORT: u16 = 123;
 const NTP_LOCAL_PORT: u16 = 1125;
-const NTP_SYNC_INTERVAL_SECS: u64 = 60;
+const NTP_SYNC_INTERVAL_SECS: u64 = 1800;
 const NTP_RETRY_SECS: u64 = 60;
 const NTP_TIMEOUT_SECS: u64 = 5;
 const NTP_MIN_POLL_SECS: u64 = 60;
-const NTP_POLL_RAMP_DURATION_SECS: u64 = 60;
+const NTP_POLL_RAMP_DURATION_SECS: u64 = 600;
 const NTP_UNIX_OFFSET: u32 = 2_208_988_800;
 const NTP_SERVERS_CONFIG: Option<&str> = option_env!("NTP_SERVERS");
 const NTP_SERVER_CONFIG: Option<&str> = option_env!("NTP_SERVER");
@@ -318,7 +318,7 @@ pub async fn ntp_sync_task(stack: Stack<'static>) {
                         .saturating_sub(t1_ticks)
                         .saturating_mul(1_000_000)
                         / embassy_time::TICK_HZ)
-                    .min(u32::MAX as u64) as u32;
+                        .min(u32::MAX as u64) as u32;
                     let server_tx_us = unix as i64 * 1_000_000 + unix_frac_us as i64;
                     let t4_est = server_tx_us.saturating_add(elapsed_us as i64 / 2);
                     let offset_us =
