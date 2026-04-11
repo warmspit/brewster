@@ -461,9 +461,18 @@ pub fn update_success(sample: RuntimeSample) {
     LAST_LED_BLUE.store(sample.led_blue, Ordering::Relaxed);
     LAST_PID_WINDOW_STEP.store(sample.pid_window_step, Ordering::Relaxed);
     LAST_PID_ON_STEPS.store(sample.pid_on_steps, Ordering::Relaxed);
-    LAST_PID_P.store(sample.pid_p_pct.clamp(-127.0, 127.0) as i8 as u8, Ordering::Relaxed);
-    LAST_PID_I.store(sample.pid_i_pct.clamp(-127.0, 127.0) as i8 as u8, Ordering::Relaxed);
-    LAST_PID_D.store(sample.pid_d_pct.clamp(-127.0, 127.0) as i8 as u8, Ordering::Relaxed);
+    LAST_PID_P.store(
+        sample.pid_p_pct.clamp(-127.0, 127.0) as i8 as u8,
+        Ordering::Relaxed,
+    );
+    LAST_PID_I.store(
+        sample.pid_i_pct.clamp(-127.0, 127.0) as i8 as u8,
+        Ordering::Relaxed,
+    );
+    LAST_PID_D.store(
+        sample.pid_d_pct.clamp(-127.0, 127.0) as i8 as u8,
+        Ordering::Relaxed,
+    );
     if collection_enabled() {
         // Map UNKNOWN_TEMPERATURE_CENTI (i32::MIN) to i32::MAX so that missing
         // sensor readings are stored as the NaN sentinel rather than as
@@ -759,7 +768,9 @@ pub fn udp_led_active() -> bool {
     now_ticks < active_until
 }
 
-pub fn current_unix_time_micros() -> Option<u64> {
+/// Time from the NTP anchor + calibrated tick interpolation.
+/// Used internally by `sqw_task` for recalibration without circular dependency.
+pub fn unix_time_micros_from_ntp_anchor() -> Option<u64> {
     if !NTP_SYNCED.load(Ordering::Relaxed) {
         return None;
     }
@@ -771,10 +782,24 @@ pub fn current_unix_time_micros() -> Option<u64> {
     Some(t4_unix_micros.saturating_add(elapsed_us))
 }
 
+/// Current Unix time in microseconds.
+///
+/// Uses tick interpolation off the NTP sync anchor.
+/// Returns `None` before the first NTP sync.
+pub fn current_unix_time_micros() -> Option<u64> {
+    unix_time_micros_from_ntp_anchor()
+}
+
 pub fn current_unix_time_millis() -> Option<u64> {
     current_unix_time_micros().map(|us| us / 1_000)
 }
 
 pub fn current_unix_time() -> Option<u32> {
     current_unix_time_millis().map(|ms| (ms / 1_000) as u32)
+}
+
+/// Number of completed NTP syncs since boot.  Monotonically increasing.
+/// Does not count RTC seed operations.
+pub fn ntp_sync_count() -> u32 {
+    NTP_SYNC_COUNT.load(Ordering::Relaxed)
 }
