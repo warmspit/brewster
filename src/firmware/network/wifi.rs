@@ -4,7 +4,7 @@
 use alloc::string::ToString;
 use embassy_net::Stack;
 use embassy_time::{Duration, Timer, with_timeout};
-use esp_radio::wifi::{WifiController, WifiDevice};
+use esp_radio::wifi::{PowerSaveMode, WifiController, WifiDevice};
 
 const WIFI_CONNECT_TIMEOUT_SECS: u64 = 20;
 const WIFI_DHCP_WAIT_TIMEOUT_SECS: u64 = 30;
@@ -43,6 +43,19 @@ pub async fn wifi_connection_task(
                 match with_timeout(Duration::from_secs(10), controller.start_async()).await {
                     Ok(Ok(())) => {
                         esp_println::println!("wifi: controller started");
+                        // Set power save mode immediately after esp_wifi_start().
+                        // Per ESP-IDF docs this is the canonical time to call
+                        // esp_wifi_set_ps().  Calling it after connect_async()
+                        // is too late — the connection state machine re-enables
+                        // WIFI_PS_MIN_MODEM during the 4-way handshake, causing
+                        // the AP to buffer unicast frames until the next DTIM
+                        // beacon (~1 s at DTIM=10) and inflating NTP RTT.
+                        match controller.set_power_saving(PowerSaveMode::None) {
+                            Ok(()) => esp_println::println!("wifi: power save disabled (PS_NONE)"),
+                            Err(e) => {
+                                esp_println::println!("wifi: set_power_saving failed: {:?}", e)
+                            }
+                        }
                     }
                     Ok(Err(error)) => {
                         esp_println::println!("wifi: controller start failed: {:?}", error);
@@ -107,6 +120,15 @@ pub async fn wifi_connection_task(
         }
 
         esp_println::println!("wifi: connecting...");
+        // Set PS_NONE immediately before connect.  Per ESP-IDF docs the
+        // power-saving mode is latched during the association exchange that
+        // happens inside esp_wifi_connect(), so this is the last reliable
+        // opportunity to ensure WIFI_PS_NONE is in effect before the
+        // firmware negotiates power management with the AP.
+        match controller.set_power_saving(PowerSaveMode::None) {
+            Ok(()) => esp_println::println!("wifi: PS_NONE set (pre-connect)"),
+            Err(e) => esp_println::println!("wifi: PS_NONE pre-connect failed: {:?}", e),
+        }
 
         match with_timeout(
             Duration::from_secs(WIFI_CONNECT_TIMEOUT_SECS),
@@ -116,6 +138,16 @@ pub async fn wifi_connection_task(
         {
             Ok(Ok(())) => {
                 esp_println::println!("wifi: connected to access point");
+                // Re-assert PS_NONE immediately after association completes.
+                // Some APs re-negotiate the PM bit during the 4-way handshake;
+                // calling set_ps here overrides whatever the association
+                // exchange may have set.
+                match controller.set_power_saving(PowerSaveMode::None) {
+                    Ok(()) => esp_println::println!("wifi: PS_NONE set (post-connect)"),
+                    Err(e) => {
+                        esp_println::println!("wifi: PS_NONE post-connect failed: {:?}", e)
+                    }
+                }
             }
             Ok(Err(error)) => {
                 esp_println::println!("wifi: connect failed: {:?}", error);
