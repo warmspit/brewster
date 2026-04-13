@@ -836,9 +836,3 @@ pub fn current_unix_time_millis() -> Option<u64> {
 pub fn current_unix_time() -> Option<u32> {
     current_unix_time_millis().map(|ms| (ms / 1_000) as u32)
 }
-
-/// Number of completed NTP syncs since boot.  Monotonically increasing.
-/// Does not count RTC seed operations.
-pub fn ntp_sync_count() -> u32 {
-    NTP_SYNC_COUNT.load(Ordering::Relaxed)
-}
