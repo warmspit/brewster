@@ -24,6 +24,11 @@ NTP_SERVER = "8.8.8.8"
 #   Cooling SSR → GPIO 12
 #   Heating SSR → GPIO 13
 #   DS18B20 data → GPIO 5  (configured via [[sensors]] below)
+#
+# Multi-probe mode (shared one-wire bus):
+# - Use the same `pin` value for every [[sensors]] entry.
+# - Map each probe by its 16-hex DS18B20 ROM serial.
+# - Discover serials with GET /sensors/scan after boot.
 
 # UDP telemetry server (optional).  Set UDP_SERVER_IP to enable.
 # brewster-server listens on port 47890 by default; run it on any LAN host.
@@ -39,15 +44,36 @@ cool_pin = 12  # GPIO pin for cooling SSR (default: 12)
 heat_pin = 13  # GPIO pin for heating SSR (default: 13)
 SSR_DEADBAND = "0.5"  # Dead zone ±0.25°C around setpoint (default: 0.5 °C)
 
+# SENSOR CONFIGURATION GUIDE
+#
+# Quick start (single probe):
+# 1) Keep one [[sensors]] block only.
+# 2) Set `pin` to your DS18B20 data pin.
+# 3) You may omit `serial` for a single-probe bus.
+#
+# Multi-probe on one pin (recommended):
+# 1) Use the SAME `pin` value for every [[sensors]] block.
+# 2) Give each probe a unique `name`.
+# 3) Boot once and call: GET /sensors/scan
+# 4) Copy each discovered ROM serial into the matching `serial` field below.
+# 5) Set exactly one `control = true` probe (the PID input sensor).
+#
+# DS18B20 serial format:
+# - 16 hex chars (example: 28ff1a2b3c4d5e6f)
+# - separators like ':' or '-' are accepted, but plain hex is easiest
+#
 [[sensors]]
 pin = 5
-name = "Freezer"
-control = true   # This is the sensor the PID uses if true
+name = "Freezer"            # Friendly display name
+serial = "28ff1a2b3c4d5e6f" # Replace with value from /sensors/scan
+control = true               # PID uses this probe
 
- [[sensors]]
- pin = 6
- name = "Thermal Well"
+[[sensors]]
+pin = 5
+name = "Thermal Well"
+serial = "28ff001122334455" # Replace with value from /sensors/scan
 
- [[sensors]]
- pin = 6
- name = "Ambient"
+[[sensors]]
+pin = 5
+name = "Ambient"
+serial = "28ffaa55bb66cc77" # Replace with value from /sensors/scan

@@ -8,7 +8,7 @@ use embassy_net::tcp::{Error as TcpError, TcpSocket};
 use embassy_time::{Duration, Timer};
 use esp_println::println;
 
-use crate::firmware::{metrics, status};
+use crate::firmware::{metrics, sensor, status};
 
 enum ResponseBody {
     Static(&'static str),
@@ -87,6 +87,41 @@ fn config_json(http: bool, prometheus: bool) -> alloc::string::String {
     body
 }
 
+fn sensor_scan_json() -> alloc::string::String {
+    let mut body = alloc::string::String::with_capacity(768);
+    let scan = status::sensor_scan_snapshot();
+    let _ = write!(
+        body,
+        "{{\n  \"ok\": true,\n  \"last_scan_uptime_s\": {},\n  \"found\": [",
+        status::sensor_scan_last_uptime_s()
+    );
+
+    for (idx, rom) in scan.iter().copied().enumerate() {
+        if idx > 0 {
+            body.push_str(",");
+        }
+        let serial = sensor::format_ds18b20_serial(rom);
+        let mapped_name = crate::firmware::config::SENSORS.iter().find_map(|cfg| {
+            let parsed = cfg.serial.and_then(sensor::parse_ds18b20_serial)?;
+            if parsed == rom { Some(cfg.name) } else { None }
+        });
+        if let Some(name) = mapped_name {
+            let _ = write!(
+                body,
+                "\n    {{ \"serial\": \"{}\", \"name\": \"{}\" }}",
+                serial, name
+            );
+        } else {
+            let _ = write!(body, "\n    {{ \"serial\": \"{}\", \"name\": null }}", serial);
+        }
+    }
+    if !scan.is_empty() {
+        body.push('\n');
+    }
+    body.push_str("  ]\n}\n");
+    body
+}
+
 /// Parse `{"http_server": true/false, "prometheus": true/false}` from the request body.
 fn parse_config_body(buf: &[u8]) -> Option<(bool, bool)> {
     let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
@@ -156,6 +191,7 @@ fn parse_probe_name(buf: &[u8]) -> Option<alloc::string::String> {
 enum ParsedRequest {
     GetStatus,
     GetHistory(usize),
+    GetSensorScan,
     GetConfig,
     #[cfg(feature = "prometheus")]
     GetMetrics,
@@ -215,6 +251,13 @@ fn parse_request(buf: &[u8]) -> ParsedRequest {
         || buf.starts_with(b"GET /history\r")
     {
         return ParsedRequest::GetHistory(parse_history_points(buf));
+    }
+
+    if buf.starts_with(b"GET /sensors/scan ")
+        || buf.starts_with(b"GET /sensors/scan?")
+        || buf.starts_with(b"GET /sensors/scan\r")
+    {
+        return ParsedRequest::GetSensorScan;
     }
 
     #[cfg(feature = "prometheus")]
@@ -398,6 +441,15 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                     "application/json",
                     "no-store",
                     ResponseBody::Owned(metrics::history_json(points)),
+                )
+            }
+            ParsedRequest::GetSensorScan => {
+                println!("http: serving sensors/scan to {:?}", remote);
+                (
+                    "200 OK",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Owned(sensor_scan_json()),
                 )
             }
             #[cfg(feature = "prometheus")]

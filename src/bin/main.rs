@@ -143,17 +143,18 @@ async fn main(spawner: Spawner) -> ! {
 
     println!("{} booting", device_hostname());
     println!(
-        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO5, ssr-cool:GPIO{}, ssr-heat:GPIO{}, led:GPIO48}}",
+        "target={:.1}C probe={} pid={{kp:{:.2}, ki:{:.2}, kd:{:.2}}} pins={{ds18b20:GPIO{}, ssr-cool:GPIO{}, ssr-heat:GPIO{}, led:GPIO48}}",
         status::get_target_temp_c(),
         status::temp_probe_name(),
         PID_KP,
         PID_KI,
         PID_KD,
+        config::ONEWIRE_PIN_NUM,
         SSR_COOL_PIN_NUM,
         SSR_HEAT_PIN_NUM,
     );
 
-    let one_wire_pin = sensor::configure_one_wire_pin(Flex::new(peripherals.GPIO5));
+    let one_wire_pin = sensor::configure_one_wire_pin(Flex::new(config::onewire_gpio!(peripherals)));
     let mut one_wire_pin = one_wire_pin;
     match sensor::ds18b20_configure_resolution(
         &mut one_wire_pin,
@@ -169,6 +170,22 @@ async fn main(spawner: Spawner) -> ! {
             "ds18b20: resolution config failed: {:?} — using hardware default",
             e
         ),
+    }
+
+    {
+        let scanned = sensor::ds18b20_scan_roms::<{ status::MAX_SENSOR_SCAN_RESULTS }>(
+            &mut one_wire_pin,
+            &mut delay,
+        );
+        status::update_sensor_scan(scanned.as_slice());
+        if scanned.is_empty() {
+            println!("ds18b20: scan found no probes");
+        } else {
+            println!("ds18b20: scan found {} probe(s)", scanned.len());
+            for rom in scanned.iter().copied() {
+                println!("ds18b20: rom={}", sensor::format_ds18b20_serial(rom));
+            }
+        }
     }
 
     let mut relay = Output::new(

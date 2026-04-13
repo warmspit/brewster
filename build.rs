@@ -84,7 +84,7 @@ fn generate_sensor_config() {
     let (mut sensors, mut control_index) = extract_sensor_blocks(&contents);
 
     if sensors.is_empty() {
-        sensors.push((5, "probe-1".to_string()));
+        sensors.push((5, "probe-1".to_string(), None));
     }
 
     if sensors.len() > MAX_SENSORS {
@@ -99,15 +99,28 @@ fn generate_sensor_config() {
         control_index = 0;
     }
 
+    let bus_pin = sensors[0].0;
+    if sensors.iter().any(|(pin, _, _)| *pin != bus_pin) {
+        println!(
+            "cargo:warning=All DS18B20 probes share one 1-Wire bus pin; using pin {} from first [[sensors]] block",
+            bus_pin
+        );
+    }
+
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let output = std::path::Path::new(&out_dir).join("sensors_config.rs");
 
     let mut generated = String::from("pub const SENSORS: &[SensorConfig] = &[\n");
-    for (pin, name) in sensors {
+    for (pin, name, serial) in sensors {
         generated.push_str("    SensorConfig { pin: ");
         generated.push_str(&pin.to_string());
         generated.push_str(", name: ");
         generated.push_str(&format!("{:?}", name));
+        generated.push_str(", serial: ");
+        match serial {
+            Some(value) => generated.push_str(&format!("Some({:?})", value)),
+            None => generated.push_str("None"),
+        }
         generated.push_str(" },\n");
     }
     generated.push_str("];\n");
@@ -117,27 +130,36 @@ fn generate_sensor_config() {
     generated.push_str(&control_index.to_string());
     generated.push_str(";\n");
 
+    generated.push_str("\nmacro_rules! onewire_gpio {\n    ($p:expr) => { $p.GPIO");
+    generated.push_str(&bus_pin.to_string());
+    generated.push_str(" };\n}\n");
+    generated.push_str("pub const ONEWIRE_PIN_NUM: u8 = ");
+    generated.push_str(&bus_pin.to_string());
+    generated.push_str(";\n");
+
     std::fs::write(output, generated).expect("failed to write generated sensors config");
 }
 
-fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
-    let mut sensors: Vec<(u8, String)> = Vec::new();
+fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String, Option<String>)>, usize) {
+    let mut sensors: Vec<(u8, String, Option<String>)> = Vec::new();
     let mut control_index: usize = 0;
     let mut control_found = false;
     let mut current_pin: Option<u8> = None;
     let mut current_name: Option<String> = None;
+    let mut current_serial: Option<String> = None;
     let mut current_control: bool = false;
     let mut in_sensor_block = false;
     let mut sensor_count = 0;
 
     let mut finalize_current = |pin: &mut Option<u8>,
                                 name: &mut Option<String>,
+                                serial: &mut Option<String>,
                                 is_control: &mut bool,
                                 index: &mut usize,
                                 control_index: &mut usize,
                                 control_found: &mut bool| {
         if let (Some(p), Some(n)) = (pin.take(), name.take()) {
-            sensors.push((p, n));
+            sensors.push((p, n, serial.take()));
             if *is_control && !*control_found {
                 *control_index = *index;
                 *control_found = true;
@@ -159,6 +181,7 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
                 finalize_current(
                     &mut current_pin,
                     &mut current_name,
+                    &mut current_serial,
                     &mut current_control,
                     &mut sensor_count,
                     &mut control_index,
@@ -168,6 +191,7 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
             in_sensor_block = true;
             current_pin = None;
             current_name = None;
+            current_serial = None;
             current_control = false;
             continue;
         }
@@ -177,6 +201,7 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
                 finalize_current(
                     &mut current_pin,
                     &mut current_name,
+                    &mut current_serial,
                     &mut current_control,
                     &mut sensor_count,
                     &mut control_index,
@@ -185,6 +210,7 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
                 in_sensor_block = false;
                 current_pin = None;
                 current_name = None;
+                current_serial = None;
                 current_control = false;
             }
             continue;
@@ -212,6 +238,15 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
                 }
                 current_name = Some(name);
             }
+            "serial" => {
+                let mut serial = value.to_string();
+                if serial.starts_with('"') && serial.ends_with('"') && serial.len() >= 2 {
+                    serial = serial[1..serial.len() - 1].to_string();
+                }
+                if !serial.is_empty() {
+                    current_serial = Some(serial);
+                }
+            }
             "control" => {
                 current_control = value.eq_ignore_ascii_case("true");
             }
@@ -223,6 +258,7 @@ fn extract_sensor_blocks(contents: &str) -> (Vec<(u8, String)>, usize) {
         finalize_current(
             &mut current_pin,
             &mut current_name,
+            &mut current_serial,
             &mut current_control,
             &mut sensor_count,
             &mut control_index,

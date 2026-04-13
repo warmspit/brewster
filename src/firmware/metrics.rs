@@ -11,7 +11,7 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use super::{shared, status};
+use super::{sensor, shared, status};
 use crate::{PID_KD, PID_KI, PID_KP, device_hostname};
 
 fn ntp_peer_snapshots() -> heapless::Vec<NtpPeerSnapshot, NTP_MAX_TRACKED_PEERS> {
@@ -196,6 +196,9 @@ pub fn json() -> String {
                 .unwrap_or("probe-3"),
             _ => "unknown",
         };
+        let sensor_serial = super::config::SENSORS
+            .get(sensor_idx)
+            .and_then(|s| s.serial);
 
         let temp_cf = if sensor_temp_centi == status::UNKNOWN_TEMPERATURE_CENTI {
             None
@@ -211,9 +214,21 @@ pub fn json() -> String {
             concat!(
                 "      \"index\": {},\n",
                 "      \"name\": \"{}\",\n",
-                "      \"temperature_c\": ",
+                "      \"serial\": ",
             ),
             sensor_idx, sensor_name,
+        );
+        if let Some(serial) = sensor_serial {
+            let _ = write!(out, "\"{}\"", serial);
+        } else {
+            out.push_str("null");
+        }
+        let _ = write!(
+            out,
+            concat!(
+                ",\n",
+                "      \"temperature_c\": ",
+            ),
         );
         if let Some((temp_c, _)) = temp_cf {
             let _ = write!(out, "{:.2}", temp_c);
@@ -233,10 +248,39 @@ pub fn json() -> String {
         );
     }
 
+    let scan = status::sensor_scan_snapshot();
+    out.push_str("\n  ],\n  \"sensor_scan\": {\n    \"last_scan_uptime_s\": ");
+    let _ = write!(out, "{}", status::sensor_scan_last_uptime_s());
+    out.push_str(",\n    \"found\": [");
+    for (idx, rom) in scan.iter().copied().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let serial = sensor::format_ds18b20_serial(rom);
+        let mapped_name = super::config::SENSORS.iter().find_map(|cfg| {
+            let parsed = cfg.serial.and_then(sensor::parse_ds18b20_serial)?;
+            if parsed == rom { Some(cfg.name) } else { None }
+        });
+        if let Some(name) = mapped_name {
+            let _ = write!(
+                out,
+                "\\n      {{ \"serial\": \"{}\", \"name\": \"{}\" }}",
+                serial, name
+            );
+        } else {
+            let _ = write!(out, "\\n      {{ \"serial\": \"{}\", \"name\": null }}", serial);
+        }
+    }
+    if !scan.is_empty() {
+        out.push('\n');
+        out.push_str("    ");
+    }
+    out.push_str("]\n  }");
+
     let _ = write!(
         out,
         concat!(
-            "\n  ],\n",
+            ",\n",
             "  \"control_probe_index\": {},\n",
             "  \"pid\": {{\n",
             "    \"target_c\": {:.1},\n",

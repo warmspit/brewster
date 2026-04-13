@@ -118,6 +118,7 @@ impl NetState {
 
 const NTP_MAX_TRACKED_PEERS: usize = shared::NTP_MAX_CONFIG_SERVERS + 1;
 pub const MAX_SENSORS: usize = 3;
+pub const MAX_SENSOR_SCAN_RESULTS: usize = 8;
 
 static LAST_TEMP_CENTI: [AtomicI32; MAX_SENSORS] = [
     AtomicI32::new(UNKNOWN_TEMPERATURE_CENTI),
@@ -161,6 +162,44 @@ static NTP_SERVER_SOURCE: AtomicU8 = AtomicU8::new(0);
 static NTP_SERVER_IP: AtomicU32 = AtomicU32::new(0);
 static NTP_PEERS: Mutex<RefCell<[Option<NtpPeerState>; NTP_MAX_TRACKED_PEERS]>> =
     Mutex::new(RefCell::new([None; NTP_MAX_TRACKED_PEERS]));
+static SENSOR_SCAN_ROMS: Mutex<RefCell<[[u8; 8]; MAX_SENSOR_SCAN_RESULTS]>> =
+    Mutex::new(RefCell::new([[0u8; 8]; MAX_SENSOR_SCAN_RESULTS]));
+static SENSOR_SCAN_COUNT: AtomicU8 = AtomicU8::new(0);
+static SENSOR_SCAN_LAST_UPTIME_S: AtomicU32 = AtomicU32::new(0);
+
+pub fn update_sensor_scan(roms: &[[u8; 8]]) {
+    let count = core::cmp::min(roms.len(), MAX_SENSOR_SCAN_RESULTS);
+    critical_section::with(|cs| {
+        let mut dest = SENSOR_SCAN_ROMS.borrow_ref_mut(cs);
+        for slot in dest.iter_mut() {
+            *slot = [0u8; 8];
+        }
+        for (index, rom) in roms.iter().copied().take(count).enumerate() {
+            dest[index] = rom;
+        }
+    });
+    SENSOR_SCAN_COUNT.store(count as u8, Ordering::Relaxed);
+    SENSOR_SCAN_LAST_UPTIME_S.store(
+        (embassy_time::Instant::now().as_ticks() / embassy_time::TICK_HZ) as u32,
+        Ordering::Relaxed,
+    );
+}
+
+pub fn sensor_scan_snapshot() -> heapless::Vec<[u8; 8], MAX_SENSOR_SCAN_RESULTS> {
+    let count = SENSOR_SCAN_COUNT.load(Ordering::Relaxed) as usize;
+    critical_section::with(|cs| {
+        let source = SENSOR_SCAN_ROMS.borrow_ref(cs);
+        let mut out = heapless::Vec::new();
+        for rom in source.iter().take(count).copied() {
+            let _ = out.push(rom);
+        }
+        out
+    })
+}
+
+pub fn sensor_scan_last_uptime_s() -> u32 {
+    SENSOR_SCAN_LAST_UPTIME_S.load(Ordering::Relaxed)
+}
 
 pub fn collection_enabled() -> bool {
     COLLECTION_ENABLED.load(Ordering::Relaxed)

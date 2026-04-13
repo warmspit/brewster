@@ -88,8 +88,39 @@ pub async fn control_step(
         Ok(()) => {
             Timer::after(Duration::from_millis(config::ds18b20_conversion_ms())).await;
 
-            match sensor::ds18b20_read_temperature_c(one_wire_pin, delay) {
-                Ok(temp_c) => {
+            let mut control_temp_c: Option<f32> = None;
+            let sensor_count = core::cmp::min(config::SENSORS.len(), status::MAX_SENSORS);
+            let control_index =
+                core::cmp::min(config::CONTROL_PROBE_INDEX, sensor_count.saturating_sub(1));
+
+            for sensor_index in 0..sensor_count {
+                let sensor_cfg = &config::SENSORS[sensor_index];
+                let rom = sensor_cfg
+                    .serial
+                    .and_then(sensor::parse_ds18b20_serial)
+                    .or_else(|| (sensor_count == 1).then_some([0u8; 8]))
+                    .and_then(|raw| if raw == [0u8; 8] { None } else { Some(raw) });
+
+                if sensor_count > 1 && sensor_cfg.serial.is_none() {
+                    status::update_sensor_error(sensor_index, SensorError::NoDevice);
+                    continue;
+                }
+
+                match sensor::ds18b20_read_temperature_c_for(one_wire_pin, delay, rom) {
+                    Ok(temp_c) => {
+                        status::update_sensor(sensor_index, temp_c);
+                        if sensor_index == control_index {
+                            control_temp_c = Some(temp_c);
+                        }
+                    }
+                    Err(error) => {
+                        status::update_sensor_error(sensor_index, error);
+                    }
+                }
+            }
+
+            match control_temp_c {
+                Some(temp_c) => {
                     if !status::collection_enabled() {
                         pid.reset_integral_term();
                         heat_pid.reset_integral_term();
@@ -227,14 +258,14 @@ pub async fn control_step(
                     *heat_window_step = (*heat_window_step + 1) % config::SSR_WINDOW_STEPS;
                     (color, cooling_on || heat_on)
                 }
-                Err(error) => on_sensor_error(
+                None => on_sensor_error(
                     pid,
                     heat_pid,
                     relay,
                     heat_relay,
                     window_step,
                     heat_window_step,
-                    error,
+                    SensorError::NoDevice,
                 ),
             }
         }
