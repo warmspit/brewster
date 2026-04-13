@@ -75,9 +75,11 @@ pub struct SensorConfig {
     #[allow(dead_code)]
     pub pin: u8,
     pub name: &'static str,
+    pub serial: Option<&'static str>,
 }
 
 include!(concat!(env!("OUT_DIR"), "/sensors_config.rs"));
+pub(crate) use onewire_gpio;
 
 pub fn status_print_every_seconds() -> u64 {
     match STATUS_PRINT_EVERY_SECONDS

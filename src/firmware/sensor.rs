@@ -9,6 +9,8 @@ use super::error::SensorError;
 use super::shared;
 
 const ONEWIRE_SKIP_ROM: u8 = 0xCC;
+const ONEWIRE_MATCH_ROM: u8 = 0x55;
+const ONEWIRE_SEARCH_ROM: u8 = 0xF0;
 const ONEWIRE_READ_SCRATCHPAD: u8 = 0xBE;
 const ONEWIRE_WRITE_SCRATCHPAD: u8 = 0x4E;
 const ONEWIRE_CONVERT_TEMP: u8 = 0x44;
@@ -103,14 +105,26 @@ fn one_wire_read_bytes(pin: &mut Flex<'static>, delay: &mut Delay, output: &mut 
     }
 }
 
+fn one_wire_write_rom(pin: &mut Flex<'static>, delay: &mut Delay, rom: [u8; 8]) {
+    for byte in rom {
+        one_wire_write_byte(pin, delay, byte);
+    }
+}
+
 fn ds18b20_issue_command(
     pin: &mut Flex<'static>,
     delay: &mut Delay,
+    rom: Option<[u8; 8]>,
     command: u8,
 ) -> Result<(), SensorError> {
     critical_section::with(|_| {
         one_wire_reset(pin, delay)?;
-        one_wire_write_byte(pin, delay, ONEWIRE_SKIP_ROM);
+        if let Some(rom) = rom {
+            one_wire_write_byte(pin, delay, ONEWIRE_MATCH_ROM);
+            one_wire_write_rom(pin, delay, rom);
+        } else {
+            one_wire_write_byte(pin, delay, ONEWIRE_SKIP_ROM);
+        }
         one_wire_write_byte(pin, delay, command);
         Ok(())
     })
@@ -119,15 +133,138 @@ fn ds18b20_issue_command(
 fn ds18b20_read_scratchpad(
     pin: &mut Flex<'static>,
     delay: &mut Delay,
+    rom: Option<[u8; 8]>,
     scratchpad: &mut [u8; 9],
 ) -> Result<(), SensorError> {
     critical_section::with(|_| {
         one_wire_reset(pin, delay)?;
-        one_wire_write_byte(pin, delay, ONEWIRE_SKIP_ROM);
+        if let Some(rom) = rom {
+            one_wire_write_byte(pin, delay, ONEWIRE_MATCH_ROM);
+            one_wire_write_rom(pin, delay, rom);
+        } else {
+            one_wire_write_byte(pin, delay, ONEWIRE_SKIP_ROM);
+        }
         one_wire_write_byte(pin, delay, ONEWIRE_READ_SCRATCHPAD);
         one_wire_read_bytes(pin, delay, scratchpad);
         Ok(())
     })
+}
+
+pub fn parse_ds18b20_serial(serial: &str) -> Option<[u8; 8]> {
+    let mut compact = [0u8; 16];
+    let mut used = 0usize;
+
+    for b in serial.bytes() {
+        if matches!(b, b':' | b'-' | b' ' | b'\t') {
+            continue;
+        }
+        if used >= compact.len() {
+            return None;
+        }
+        compact[used] = b;
+        used += 1;
+    }
+
+    if used != 16 {
+        return None;
+    }
+
+    let mut rom = [0u8; 8];
+    for i in 0..8 {
+        let hi = (compact[i * 2] as char).to_digit(16)? as u8;
+        let lo = (compact[i * 2 + 1] as char).to_digit(16)? as u8;
+        rom[i] = (hi << 4) | lo;
+    }
+
+    Some(rom)
+}
+
+pub fn format_ds18b20_serial(rom: [u8; 8]) -> heapless::String<16> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = heapless::String::<16>::new();
+    for byte in rom {
+        let _ = out.push(HEX[(byte >> 4) as usize] as char);
+        let _ = out.push(HEX[(byte & 0x0F) as usize] as char);
+    }
+    out
+}
+
+pub fn ds18b20_scan_roms<const MAX: usize>(
+    pin: &mut Flex<'static>,
+    delay: &mut Delay,
+) -> heapless::Vec<[u8; 8], MAX> {
+    let mut found = heapless::Vec::<[u8; 8], MAX>::new();
+    let mut last_discrepancy = 0u8;
+    let mut last_device = false;
+    let mut rom = [0u8; 8];
+
+    while !last_device {
+        let mut bit_number = 1u8;
+        let mut next_discrepancy = 0u8;
+        let mut next_rom = [0u8; 8];
+
+        let search_ok = critical_section::with(|_| -> Result<bool, SensorError> {
+            one_wire_reset(pin, delay)?;
+            one_wire_write_byte(pin, delay, ONEWIRE_SEARCH_ROM);
+
+            while bit_number <= 64 {
+                let id_bit = one_wire_read_bit(pin, delay);
+                let cmp_id_bit = one_wire_read_bit(pin, delay);
+
+                let take_one = match (id_bit, cmp_id_bit) {
+                    (true, true) => return Ok(false),
+                    (false, false) => {
+                        if bit_number < last_discrepancy {
+                            (rom[(bit_number as usize - 1) / 8] >> ((bit_number as usize - 1) % 8))
+                                & 1
+                                == 1
+                        } else if bit_number == last_discrepancy {
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    (false, true) => false,
+                    (true, false) => true,
+                };
+
+                if !id_bit && !cmp_id_bit && !take_one {
+                    next_discrepancy = bit_number;
+                }
+
+                let byte_index = (bit_number as usize - 1) / 8;
+                let bit_index = (bit_number as usize - 1) % 8;
+                if take_one {
+                    next_rom[byte_index] |= 1 << bit_index;
+                }
+
+                one_wire_write_bit(pin, delay, take_one);
+                bit_number += 1;
+            }
+
+            Ok(true)
+        });
+
+        let Ok(true) = search_ok else {
+            break;
+        };
+
+        if crc8_maxim(&next_rom[..7]) != next_rom[7] {
+            break;
+        }
+
+        if found.push(next_rom).is_err() {
+            break;
+        }
+
+        rom = next_rom;
+        last_discrepancy = next_discrepancy;
+        if last_discrepancy == 0 {
+            last_device = true;
+        }
+    }
+
+    found
 }
 
 /// Write the DS18B20 configuration register to set the ADC resolution.
@@ -161,16 +298,17 @@ pub fn ds18b20_start_conversion(
     pin: &mut Flex<'static>,
     delay: &mut Delay,
 ) -> Result<(), SensorError> {
-    ds18b20_issue_command(pin, delay, ONEWIRE_CONVERT_TEMP)
+    ds18b20_issue_command(pin, delay, None, ONEWIRE_CONVERT_TEMP)
 }
 
-pub fn ds18b20_read_temperature_c(
+pub fn ds18b20_read_temperature_c_for(
     pin: &mut Flex<'static>,
     delay: &mut Delay,
+    rom: Option<[u8; 8]>,
 ) -> Result<f32, SensorError> {
     for attempt in 0..DS18B20_READ_ATTEMPTS {
         let mut scratchpad = [0u8; 9];
-        ds18b20_read_scratchpad(pin, delay, &mut scratchpad)?;
+        ds18b20_read_scratchpad(pin, delay, rom, &mut scratchpad)?;
 
         if crc8_maxim(&scratchpad[..8]) != scratchpad[8] {
             if attempt + 1 < DS18B20_READ_ATTEMPTS {
@@ -184,6 +322,14 @@ pub fn ds18b20_read_temperature_c(
     }
 
     Err(SensorError::CrcMismatch)
+}
+
+#[allow(dead_code)]
+pub fn ds18b20_read_temperature_c(
+    pin: &mut Flex<'static>,
+    delay: &mut Delay,
+) -> Result<f32, SensorError> {
+    ds18b20_read_temperature_c_for(pin, delay, None)
 }
 
 fn crc8_maxim(bytes: &[u8]) -> u8 {

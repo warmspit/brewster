@@ -119,6 +119,7 @@ Supported routes:
 - `GET /panel`
 - `GET /dashboard.js`
 - `GET /status`
+- `GET /sensors/scan`
 - `GET /history?points=<N>`
 - `GET /metrics`
 - `POST /temperature`
@@ -141,6 +142,22 @@ Dashboard interactions:
 - menu controls to start/stop collection and clear persisted history
 
 `GET /status` returns the raw JSON status document used by the dashboard.
+
+`GET /sensors/scan` returns the last one-wire ROM scan so you can map physical
+probes to `[[sensors]].serial` values.
+
+Notes:
+
+- The current scan payload is captured at boot.
+- Reboot after wiring changes to refresh scan results.
+- In a shared-bus setup, all probes use the same `[[sensors]].pin` and are
+  matched by `[[sensors]].serial`.
+
+Example:
+
+```sh
+curl http://brewster.local/sensors/scan
+```
 
 Example:
 
@@ -267,6 +284,7 @@ hostname = "brewster"
 [[sensors]]
 pin = 5
 name = "probe-1"
+serial = "28ff1a2b3c4d5e6f"
 ```
 
 Supported keys:
@@ -284,16 +302,27 @@ Probe configuration keys:
 - `[device].hostname`: dashboard and network display hostname
 - `[[sensors]].pin`: GPIO pin for a DS18B20 probe
 - `[[sensors]].name`: human-readable probe name shown in status/dashboard
+- `[[sensors]].serial`: DS18B20 ROM serial (16 hex chars, optional for single-probe bus)
 
 To add another probe, append another `[[sensors]]` block:
 
 ```toml
 [[sensors]]
-pin = 6
+pin = 5
 name = "probe-2"
+serial = "28ff001122334455"
 ```
 
-Current firmware behavior: PID control uses the first sensor in the list (`[[sensors]]` block #1). Additional sensors are exposed as extra readings.
+For a shared one-wire bus, set the same `pin` for all probes and assign each
+probe by `serial`. Additional sensors are exposed as extra readings.
+
+Recommended setup flow for multiple probes on one pin:
+
+1. Wire all DS18B20 probes to the same GPIO data pin.
+2. Boot once with placeholder `serial` values.
+3. Call `GET /sensors/scan` and note the discovered ROM serials.
+4. Update each `[[sensors]].serial` to match the intended probe name.
+5. Rebuild/reflash and reboot.
 
 ## Toolchain And Build Setup
 
