@@ -154,7 +154,8 @@ async fn main(spawner: Spawner) -> ! {
         SSR_HEAT_PIN_NUM,
     );
 
-    let one_wire_pin = sensor::configure_one_wire_pin(Flex::new(config::onewire_gpio!(peripherals)));
+    let one_wire_pin =
+        sensor::configure_one_wire_pin(Flex::new(config::onewire_gpio!(peripherals)));
     let mut one_wire_pin = one_wire_pin;
     match sensor::ds18b20_configure_resolution(
         &mut one_wire_pin,
@@ -269,6 +270,14 @@ async fn main(spawner: Spawner) -> ! {
             &mut last_target_c,
         )
         .await;
+
+        // Advance the active temperature profile (if any).  When the profile
+        // steps to a new target the updated temperature is stored atomically;
+        // the next control_step will detect the setpoint change and reset PID.
+        firmware::profile::profile_tick(
+            status::primary_temp_centi() as f32 / 100.0,
+            config::ssr_deadband_c(),
+        );
 
         // Priority: HTTP error (red) > HTTP ok (blue) > UDP send (violet) > idle.
         let display_color = match status::http_led_state() {

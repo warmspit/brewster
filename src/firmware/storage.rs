@@ -18,6 +18,291 @@ use super::error::StorageError as PersistError;
 
 pub const TEMP_PROBE_NAME_MAX_LEN: usize = 32;
 
+// ── Temperature profile storage ───────────────────────────────────────────────
+
+pub const PROFILE_NAME_MAX_LEN: usize = 16;
+/// Alias for compatibility.
+pub const MAX_PROFILE_NAME_LEN: usize = PROFILE_NAME_MAX_LEN;
+pub const MAX_PROFILES: usize = 4;
+pub const MAX_STEPS_PER_PROFILE: usize = 8;
+
+/// One step in a temperature profile: hold `target_c` for `hold_secs` seconds.
+#[derive(Clone, Debug)]
+pub struct ProfileStep {
+    pub target_c: f32,
+    pub hold_secs: u32,
+}
+
+/// A named temperature profile consisting of ordered steps.
+#[derive(Clone, Debug)]
+pub struct TempProfile {
+    pub name: heapless::String<PROFILE_NAME_MAX_LEN>,
+    pub steps: heapless::Vec<ProfileStep, MAX_STEPS_PER_PROFILE>,
+}
+
+/// Errors returned by profile CRUD operations.
+#[derive(Debug)]
+pub enum ProfileError {
+    /// No profile with the requested name was found.
+    NotFound,
+    /// The profile name is empty, too long, or contains invalid characters.
+    InvalidName,
+    /// The steps list is empty or a step value is out of range.
+    InvalidStep,
+    /// All profile slots are occupied.
+    SlotsFull,
+    /// A flash read, erase, or write operation failed.
+    StorageFailed,
+}
+
+// Flash layout for profiles — stored in the cfg partition at PROFILE_STORE_OFFSET_IN_PARTITION.
+// This offset sits in sector 0 (0x000–0xFFF) alongside the target-temp record (0x000) and
+// feature flags (0x200).  Updating profiles requires a full sector-0 read–erase–write cycle
+// so that the other two records are preserved.
+//
+// Layout starting at offset 0x400 within the partition:
+//   [0..4]    magic = b"BRWP"
+//   [4]       version = 1
+//   [5..8]    reserved (0xFF)
+//   [8..]     up to MAX_PROFILES slots of PROFILE_SLOT_SIZE bytes each
+//
+// Each slot (84 bytes):
+//   [0]       valid: 0x01 = occupied, 0xFF = blank/erased, 0x00 = deleted
+//   [1]       name_len (1..=PROFILE_NAME_MAX_LEN)
+//   [2..18]   name bytes, zero-padded
+//   [18]      step_count (0..=MAX_STEPS_PER_PROFILE)
+//   [19]      reserved
+//   [20..84]  steps: MAX_STEPS_PER_PROFILE × 8 bytes each
+//               [0..2]  target_centi: i16 LE
+//               [2..4]  reserved
+//               [4..8]  hold_secs: u32 LE
+
+const PROFILE_STORE_OFFSET_IN_PARTITION: usize = 0x400;
+const PROFILE_MAGIC: [u8; 4] = *b"BRWP";
+const PROFILE_HEADER_VERSION: u8 = 1;
+const PROFILE_HEADER_SIZE: usize = 8;
+const PROFILE_SLOT_SIZE: usize = 84; // 1+1+16+1+1+(8*8)
+const PROFILE_SLOT_VALID: u8 = 0x01;
+const FLASH_SECTOR_SIZE: usize = 0x1000; // 4 KiB
+
+fn is_valid_profile_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.')
+}
+
+fn validate_profile_name(name: &str) -> Result<(), ProfileError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > PROFILE_NAME_MAX_LEN {
+        return Err(ProfileError::InvalidName);
+    }
+    if !trimmed.chars().all(is_valid_profile_name_char) {
+        return Err(ProfileError::InvalidName);
+    }
+    Ok(())
+}
+
+fn decode_profile_slot(raw: &[u8; PROFILE_SLOT_SIZE]) -> Option<TempProfile> {
+    if raw[0] != PROFILE_SLOT_VALID {
+        return None;
+    }
+    let name_len = raw[1] as usize;
+    if name_len == 0 || name_len > PROFILE_NAME_MAX_LEN {
+        return None;
+    }
+    let name_bytes = &raw[2..2 + name_len];
+    let name_str = core::str::from_utf8(name_bytes).ok()?;
+    let mut name: heapless::String<PROFILE_NAME_MAX_LEN> = heapless::String::new();
+    name.push_str(name_str).ok()?;
+
+    let step_count = raw[18] as usize;
+    if step_count > MAX_STEPS_PER_PROFILE {
+        return None;
+    }
+    let mut steps: heapless::Vec<ProfileStep, MAX_STEPS_PER_PROFILE> = heapless::Vec::new();
+    for i in 0..step_count {
+        let base = 20 + i * 8;
+        let target_centi = i16::from_le_bytes([raw[base], raw[base + 1]]);
+        let hold_secs =
+            u32::from_le_bytes([raw[base + 4], raw[base + 5], raw[base + 6], raw[base + 7]]);
+        steps
+            .push(ProfileStep {
+                target_c: target_centi as f32 / 100.0,
+                hold_secs,
+            })
+            .ok()?;
+    }
+    Some(TempProfile { name, steps })
+}
+
+fn encode_profile_slot(raw: &mut [u8], profile: &TempProfile) {
+    raw.fill(0xFF);
+    raw[0] = PROFILE_SLOT_VALID;
+    raw[1] = profile.name.len() as u8;
+    raw[2..18].fill(0x00);
+    raw[2..2 + profile.name.len()].copy_from_slice(profile.name.as_bytes());
+    raw[18] = profile.steps.len() as u8;
+    raw[19] = 0xFF;
+    for (i, step) in profile.steps.iter().enumerate() {
+        let base = 20 + i * 8;
+        let target_centi = ((step.target_c * 100.0) as i32) as i16;
+        raw[base..base + 2].copy_from_slice(&target_centi.to_le_bytes());
+        // raw[base+2..base+4] stays 0xFF (reserved)
+        raw[base + 4..base + 8].copy_from_slice(&step.hold_secs.to_le_bytes());
+    }
+}
+
+/// Update one profile slot in flash.  Performs a full sector-0 read–erase–write
+/// so that the target-temp and feature-flags records in the same sector are
+/// preserved.  Pass `None` to delete (zero-fill) the slot.
+fn profile_write_slot(slot: usize, profile: Option<&TempProfile>) -> Result<(), PersistError> {
+    let partition_base = TARGET_STORE_OFFSET.load(Ordering::Relaxed);
+    let partition_len = TARGET_STORE_PARTITION_LEN.load(Ordering::Relaxed);
+
+    if partition_base == 0 || partition_len < FLASH_SECTOR_SIZE as u32 {
+        return Err(PersistError::MissingPartition);
+    }
+
+    // Heap-allocate the sector buffer outside the critical section so that the
+    // allocator's own critical section does not nest inside ours.
+    let mut sector_buf = alloc::vec![0u8; FLASH_SECTOR_SIZE];
+
+    critical_section::with(|cs| -> Result<(), PersistError> {
+        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
+        let Some(storage) = guard.as_mut() else {
+            return Err(PersistError::NotInitialized);
+        };
+
+        // Read current contents of sector 0.
+        storage.read(partition_base, &mut sector_buf)?;
+
+        // Ensure the profile-store header is written.
+        let hdr = PROFILE_STORE_OFFSET_IN_PARTITION;
+        if sector_buf[hdr..hdr + 4] != PROFILE_MAGIC {
+            sector_buf[hdr..hdr + 4].copy_from_slice(&PROFILE_MAGIC);
+            sector_buf[hdr + 4] = PROFILE_HEADER_VERSION;
+            sector_buf[hdr + 5] = 0xFF;
+            sector_buf[hdr + 6] = 0xFF;
+            sector_buf[hdr + 7] = 0xFF;
+        }
+
+        // Encode the slot (or zero-fill for delete).
+        let slot_start = hdr + PROFILE_HEADER_SIZE + slot * PROFILE_SLOT_SIZE;
+        let slot_buf = &mut sector_buf[slot_start..slot_start + PROFILE_SLOT_SIZE];
+        if let Some(p) = profile {
+            encode_profile_slot(slot_buf, p);
+        } else {
+            slot_buf.fill(0x00); // mark deleted
+        }
+
+        // Erase sector 0, then write the modified buffer back.
+        NorFlash::erase(
+            storage,
+            partition_base,
+            partition_base + FLASH_SECTOR_SIZE as u32,
+        )?;
+        Storage::write(storage, partition_base, &sector_buf)?;
+
+        Ok(())
+    })
+}
+
+/// Load the profile stored in `slot` from flash.  Returns `None` if the slot
+/// is empty, deleted, or corrupt.
+pub fn profile_load(slot: usize) -> Option<TempProfile> {
+    if slot >= MAX_PROFILES {
+        return None;
+    }
+    let partition_base = TARGET_STORE_OFFSET.load(Ordering::Relaxed);
+    let partition_len = TARGET_STORE_PARTITION_LEN.load(Ordering::Relaxed);
+    let required = (PROFILE_STORE_OFFSET_IN_PARTITION
+        + PROFILE_HEADER_SIZE
+        + (slot + 1) * PROFILE_SLOT_SIZE) as u32;
+    if partition_base == 0 || partition_len < required {
+        return None;
+    }
+
+    let slot_offset = partition_base
+        + (PROFILE_STORE_OFFSET_IN_PARTITION + PROFILE_HEADER_SIZE + slot * PROFILE_SLOT_SIZE)
+            as u32;
+
+    let mut raw = [0u8; PROFILE_SLOT_SIZE];
+    critical_section::with(|cs| -> Option<TempProfile> {
+        let mut guard = FLASH_STORAGE.borrow_ref_mut(cs);
+        let storage = guard.as_mut()?;
+        storage.read(slot_offset, &mut raw).ok()?;
+        decode_profile_slot(&raw)
+    })
+}
+
+/// Save (create or replace) a profile in the given slot.
+pub fn profile_save(slot: usize, profile: &TempProfile) -> Result<(), ProfileError> {
+    if slot >= MAX_PROFILES {
+        return Err(ProfileError::SlotsFull);
+    }
+    validate_profile_name(&profile.name)?;
+    if profile.steps.is_empty() {
+        return Err(ProfileError::InvalidStep);
+    }
+    for step in &profile.steps {
+        if !(-20.0_f32..=100.0).contains(&step.target_c) || step.hold_secs == 0 {
+            return Err(ProfileError::InvalidStep);
+        }
+    }
+    profile_write_slot(slot, Some(profile)).map_err(|_| ProfileError::StorageFailed)
+}
+
+/// Delete the profile in `slot`.
+pub fn profile_delete(slot: usize) -> Result<(), ProfileError> {
+    if slot >= MAX_PROFILES {
+        return Err(ProfileError::NotFound);
+    }
+    profile_write_slot(slot, None).map_err(|_| ProfileError::StorageFailed)
+}
+
+/// Find a profile by name.  Returns `(slot_index, profile)` or `None`.
+pub fn profile_find_by_name(name: &str) -> Option<(usize, TempProfile)> {
+    for slot in 0..MAX_PROFILES {
+        if let Some(p) = profile_load(slot) {
+            if p.name.as_str().eq_ignore_ascii_case(name) {
+                return Some((slot, p));
+            }
+        }
+    }
+    None
+}
+
+/// Find the first empty (unused) profile slot.
+pub fn profile_find_empty_slot() -> Option<usize> {
+    for slot in 0..MAX_PROFILES {
+        if profile_load(slot).is_none() {
+            return Some(slot);
+        }
+    }
+    None
+}
+
+/// Return the number of currently stored profiles.
+#[allow(dead_code)]
+pub fn profile_count() -> usize {
+    (0..MAX_PROFILES)
+        .filter(|&s| profile_load(s).is_some())
+        .count()
+}
+
+/// Update the in-RAM target temperature without persisting to flash.
+/// Used by the profile runner to change setpoints mid-profile.
+pub fn set_target_temp_c_ram(target_c: f32) {
+    let scaled = target_c * 100.0;
+    let centi = if scaled >= 0.0 {
+        (scaled + 0.5) as i32
+    } else {
+        (scaled - 0.5) as i32
+    };
+    TARGET_TEMP_CENTI.store(
+        centi.clamp(TARGET_TEMP_MIN_CENTI, TARGET_TEMP_MAX_CENTI),
+        Ordering::Relaxed,
+    );
+}
+
 const TARGET_TEMP_MIN_CENTI: i32 = -2_000;
 const TARGET_TEMP_MAX_CENTI: i32 = 10_000;
 const TARGET_STORE_MAGIC: [u8; 4] = *b"BRWT";
@@ -496,9 +781,15 @@ fn persist_flags(http: bool, prometheus: bool, collecting: bool) -> Result<(), P
 
     let offset = flags_offset(store_offset);
     let mut flags: u8 = 0;
-    if http { flags |= FLAGS_HTTP_BIT; }
-    if prometheus { flags |= FLAGS_PROMETHEUS_BIT; }
-    if collecting { flags |= FLAGS_COLLECTING_BIT; }
+    if http {
+        flags |= FLAGS_HTTP_BIT;
+    }
+    if prometheus {
+        flags |= FLAGS_PROMETHEUS_BIT;
+    }
+    if collecting {
+        flags |= FLAGS_COLLECTING_BIT;
+    }
 
     let mut raw = [0xFFu8; FLAGS_STORE_SIZE];
     raw[0..4].copy_from_slice(&FLAGS_STORE_MAGIC);

@@ -18,6 +18,16 @@ pub use super::storage::{
     set_target_temp_c_persistent, set_temp_probe_name, temp_probe_name,
 };
 
+// Re-export profile persistence types and CRUD from storage.
+pub use super::storage::{
+    MAX_PROFILE_NAME_LEN, MAX_PROFILES, MAX_STEPS_PER_PROFILE, ProfileError, ProfileStep,
+    TempProfile, profile_delete, profile_find_by_name, profile_find_empty_slot, profile_load,
+    profile_save,
+};
+
+// Re-export profile runtime state machine from profile module.
+pub use super::profile::{active_state as active_profile_state, start_profile, stop_profile};
+
 #[repr(u8)]
 #[derive(Clone, Copy)]
 enum SensorStatus {

@@ -112,7 +112,11 @@ fn sensor_scan_json() -> alloc::string::String {
                 serial, name
             );
         } else {
-            let _ = write!(body, "\n    {{ \"serial\": \"{}\", \"name\": null }}", serial);
+            let _ = write!(
+                body,
+                "\n    {{ \"serial\": \"{}\", \"name\": null }}",
+                serial
+            );
         }
     }
     if !scan.is_empty() {
@@ -203,6 +207,17 @@ enum ParsedRequest {
         http: bool,
         prometheus: bool,
     },
+    // Temperature profile endpoints
+    GetProfiles,
+    GetProfile(alloc::string::String),
+    GetActiveProfile,
+    PostProfile {
+        name: alloc::string::String,
+        steps: heapless::Vec<(f32, u32), { status::MAX_STEPS_PER_PROFILE }>,
+    },
+    DeleteProfile(alloc::string::String),
+    StartProfile(alloc::string::String),
+    StopProfile,
     BadRequest,
     NotFound,
 }
@@ -331,7 +346,279 @@ fn parse_request(buf: &[u8]) -> ParsedRequest {
         };
     }
 
+    // ── Temperature profile endpoints ─────────────────────────────────────
+
+    if buf.starts_with(b"GET /profiles ")
+        || buf.starts_with(b"GET /profiles\r")
+        || buf.starts_with(b"GET /profiles?")
+    {
+        return ParsedRequest::GetProfiles;
+    }
+
+    if buf.starts_with(b"GET /profiles/active ") || buf.starts_with(b"GET /profiles/active\r") {
+        return ParsedRequest::GetActiveProfile;
+    }
+
+    if buf.starts_with(b"POST /profiles/stop ") || buf.starts_with(b"POST /profiles/stop\r") {
+        return ParsedRequest::StopProfile;
+    }
+
+    // POST /profiles/<name>/start
+    if buf.starts_with(b"POST /profiles/") {
+        if let Some(name) = parse_url_segment_before(buf, b"POST /profiles/", b"/start ") {
+            return ParsedRequest::StartProfile(name);
+        }
+    }
+
+    // GET /profiles/<name>
+    if buf.starts_with(b"GET /profiles/") {
+        if let Some(name) = parse_url_name(buf, b"GET /profiles/") {
+            return ParsedRequest::GetProfile(name);
+        }
+        return ParsedRequest::BadRequest;
+    }
+
+    // POST /profiles/<name>  (create / replace)
+    if buf.starts_with(b"POST /profiles/") {
+        let header_end = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(i) => i,
+            None => return ParsedRequest::BadRequest,
+        };
+        let body = match core::str::from_utf8(&buf[header_end + 4..]) {
+            Ok(s) => s.trim(),
+            Err(_) => return ParsedRequest::BadRequest,
+        };
+        let name = match parse_url_name(buf, b"POST /profiles/") {
+            Some(n) => n,
+            None => return ParsedRequest::BadRequest,
+        };
+        let steps = match parse_profile_steps(body) {
+            Some(s) => s,
+            None => return ParsedRequest::BadRequest,
+        };
+        return ParsedRequest::PostProfile { name, steps };
+    }
+
+    // DELETE /profiles/<name>
+    if buf.starts_with(b"DELETE /profiles/") {
+        if let Some(name) = parse_url_name(buf, b"DELETE /profiles/") {
+            return ParsedRequest::DeleteProfile(name);
+        }
+        return ParsedRequest::BadRequest;
+    }
+
     ParsedRequest::NotFound
+}
+
+/// Extract the URL segment after `prefix` up to the next `/`, space, `?`, or `\r`.
+fn parse_url_name(buf: &[u8], prefix: &[u8]) -> Option<alloc::string::String> {
+    if !buf.starts_with(prefix) {
+        return None;
+    }
+    let rest = &buf[prefix.len()..];
+    let end = rest
+        .iter()
+        .position(|&b| matches!(b, b'/' | b' ' | b'?' | b'\r' | b'\n'))
+        .unwrap_or(rest.len());
+    let name = core::str::from_utf8(&rest[..end]).ok()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Extract the URL segment between `prefix` and `suffix`.
+fn parse_url_segment_before(
+    buf: &[u8],
+    prefix: &[u8],
+    suffix: &[u8],
+) -> Option<alloc::string::String> {
+    if !buf.starts_with(prefix) {
+        return None;
+    }
+    let rest = &buf[prefix.len()..];
+    let end = rest.windows(suffix.len()).position(|w| w == suffix)?;
+    let name = core::str::from_utf8(&rest[..end]).ok()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Parse `"target_c"` (f32) from a JSON object fragment.
+fn parse_json_f32_field(body: &str, key: &str) -> Option<f32> {
+    let key_bytes = key.as_bytes();
+    let needle_len = key_bytes.len() + 2;
+    let body_bytes = body.as_bytes();
+    let key_pos = body_bytes.windows(needle_len).position(|w| {
+        w[0] == b'"' && w[1..needle_len - 1] == *key_bytes && w[needle_len - 1] == b'"'
+    })?;
+    let after = &body[key_pos + needle_len..];
+    let after_colon = after.splitn(2, ':').nth(1)?.trim_start();
+    let end = after_colon
+        .find(|c: char| matches!(c, ',' | '}' | ' ' | '\t' | '\r' | '\n'))
+        .unwrap_or(after_colon.len());
+    after_colon[..end].parse::<f32>().ok()
+}
+
+/// Parse `"hold_secs"` (u32) from a JSON object fragment.
+fn parse_json_u32_field(body: &str, key: &str) -> Option<u32> {
+    let key_bytes = key.as_bytes();
+    let needle_len = key_bytes.len() + 2;
+    let body_bytes = body.as_bytes();
+    let key_pos = body_bytes.windows(needle_len).position(|w| {
+        w[0] == b'"' && w[1..needle_len - 1] == *key_bytes && w[needle_len - 1] == b'"'
+    })?;
+    let after = &body[key_pos + needle_len..];
+    let after_colon = after.splitn(2, ':').nth(1)?.trim_start();
+    let end = after_colon
+        .find(|c: char| matches!(c, ',' | '}' | ' ' | '\t' | '\r' | '\n'))
+        .unwrap_or(after_colon.len());
+    after_colon[..end].parse::<u32>().ok()
+}
+
+/// Parse the `"steps": [...]` array from a profile POST body.
+/// Each element must contain `target_c` (f32) and `hold_secs` (u32).
+fn parse_profile_steps(
+    body: &str,
+) -> Option<heapless::Vec<(f32, u32), { status::MAX_STEPS_PER_PROFILE }>> {
+    let steps_pos = body.find("\"steps\"")?;
+    let after_steps = &body[steps_pos + 7..];
+    let colon_pos = after_steps.find(':')?;
+    let after_colon = after_steps[colon_pos + 1..].trim_start();
+    if !after_colon.starts_with('[') {
+        return None;
+    }
+    let mut cursor = &after_colon[1..]; // skip '['
+    let mut steps = heapless::Vec::new();
+
+    loop {
+        cursor = cursor.trim_start();
+        if cursor.starts_with(']') {
+            break;
+        }
+        if cursor.starts_with(',') {
+            cursor = &cursor[1..];
+            continue;
+        }
+        if !cursor.starts_with('{') {
+            return None;
+        }
+        let end = cursor.find('}')?;
+        let obj = &cursor[1..end];
+        cursor = &cursor[end + 1..];
+
+        let target_c = parse_json_f32_field(obj, "target_c")?;
+        let hold_secs = parse_json_u32_field(obj, "hold_secs")?;
+
+        if !(-20.0_f32..=100.0).contains(&target_c) || hold_secs == 0 {
+            return None;
+        }
+        if steps.push((target_c, hold_secs)).is_err() {
+            return None; // too many steps
+        }
+    }
+    if steps.is_empty() { None } else { Some(steps) }
+}
+
+/// Serialize all stored profiles as a JSON list.
+fn profiles_list_json() -> alloc::string::String {
+    use core::fmt::Write as _;
+    let mut body = alloc::string::String::with_capacity(512);
+    body.push_str("{\n  \"profiles\": [");
+    let mut first = true;
+    for slot in 0..status::MAX_PROFILES {
+        if let Some(p) = status::profile_load(slot) {
+            if !first {
+                body.push(',');
+            }
+            first = false;
+            let _ = write!(
+                body,
+                "\n    {{ \"slot\": {}, \"name\": \"{}\", \"steps\": {} }}",
+                slot,
+                p.name,
+                p.steps.len()
+            );
+        }
+    }
+    if !first {
+        body.push('\n');
+    }
+    body.push_str("  ]\n}\n");
+    body
+}
+
+/// Serialize one profile as JSON.
+fn profile_json(slot: usize, profile: &status::TempProfile) -> alloc::string::String {
+    use core::fmt::Write as _;
+    let mut body = alloc::string::String::with_capacity(512);
+    let _ = write!(
+        body,
+        concat!(
+            "{{\n",
+            "  \"ok\": true,\n",
+            "  \"slot\": {},\n",
+            "  \"name\": \"{}\",\n",
+            "  \"steps\": ["
+        ),
+        slot, profile.name,
+    );
+    for (i, step) in profile.steps.iter().enumerate() {
+        if i > 0 {
+            body.push(',');
+        }
+        let _ = write!(
+            body,
+            "\n    {{ \"target_c\": {:.2}, \"target_f\": {:.2}, \"hold_secs\": {} }}",
+            step.target_c,
+            step.target_c * 9.0 / 5.0 + 32.0,
+            step.hold_secs,
+        );
+    }
+    if !profile.steps.is_empty() {
+        body.push('\n');
+    }
+    body.push_str("  ]\n}\n");
+    body
+}
+
+/// Serialize the active profile runtime state as JSON.
+fn active_profile_json() -> alloc::string::String {
+    use core::fmt::Write as _;
+    match status::active_profile_state() {
+        None => "{\n  \"active\": false\n}\n".to_string(),
+        Some(s) => {
+            let mut body = alloc::string::String::with_capacity(256);
+            let _ = write!(
+                body,
+                concat!(
+                    "{{\n",
+                    "  \"active\": true,\n",
+                    "  \"name\": \"{}\",\n",
+                    "  \"step_index\": {},\n",
+                    "  \"total_steps\": {},\n",
+                    "  \"step_target_c\": {:.2},\n",
+                    "  \"step_target_f\": {:.2},\n",
+                    "  \"step_hold_secs\": {},\n",
+                    "  \"at_target\": {},\n",
+                    "  \"hold_elapsed_secs\": {}\n",
+                    "}}\n"
+                ),
+                s.name,
+                s.step_index,
+                s.total_steps,
+                s.step_target_c,
+                s.step_target_c * 9.0 / 5.0 + 32.0,
+                s.step_hold_secs,
+                if s.at_target { "true" } else { "false" },
+                s.hold_elapsed_secs,
+            );
+            body
+        }
+    }
 }
 
 async fn socket_write_all(socket: &mut TcpSocket<'_>, mut data: &[u8]) -> Result<(), TcpError> {
@@ -630,6 +917,192 @@ pub(super) async fn http_status_task(stack: Stack<'static>) {
                     "application/json",
                     "no-store",
                     ResponseBody::Static("{\n  \"error\": \"not_found\"\n}\n"),
+                )
+            }
+            // ── Temperature profile handlers ──────────────────────────────────
+            ParsedRequest::GetProfiles => (
+                "200 OK",
+                "application/json",
+                "no-store",
+                ResponseBody::Owned(profiles_list_json()),
+            ),
+            ParsedRequest::GetProfile(name) => match status::profile_find_by_name(&name) {
+                Some((slot, profile)) => (
+                    "200 OK",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Owned(profile_json(slot, &profile)),
+                ),
+                None => (
+                    "404 Not Found",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Static("{\n  \"error\": \"profile_not_found\"\n}\n"),
+                ),
+            },
+            ParsedRequest::GetActiveProfile => (
+                "200 OK",
+                "application/json",
+                "no-store",
+                ResponseBody::Owned(active_profile_json()),
+            ),
+            ParsedRequest::PostProfile { name, steps } => {
+                // Find existing slot by name or claim a new one.
+                let slot = status::profile_find_by_name(&name)
+                    .map(|(s, _)| s)
+                    .or_else(|| status::profile_find_empty_slot());
+                match slot {
+                    None => (
+                        "409 Conflict",
+                        "application/json",
+                        "no-store",
+                        ResponseBody::Static("{\n  \"error\": \"profile_slots_full\"\n}\n"),
+                    ),
+                    Some(slot) => {
+                        let mut profile_name: heapless::String<{ status::MAX_PROFILE_NAME_LEN }> =
+                            heapless::String::new();
+                        let _ = profile_name.push_str(name.trim());
+                        let profile_steps: heapless::Vec<
+                            status::ProfileStep,
+                            { status::MAX_STEPS_PER_PROFILE },
+                        > = steps
+                            .iter()
+                            .map(|&(target_c, hold_secs)| status::ProfileStep {
+                                target_c,
+                                hold_secs,
+                            })
+                            .collect();
+                        let profile = status::TempProfile {
+                            name: profile_name,
+                            steps: profile_steps,
+                        };
+                        match status::profile_save(slot, &profile) {
+                            Ok(()) => {
+                                println!(
+                                    "http: profile '{}' saved in slot {} from {:?}",
+                                    name, slot, remote
+                                );
+                                (
+                                    "200 OK",
+                                    "application/json",
+                                    "no-store",
+                                    ResponseBody::Owned(profile_json(slot, &profile)),
+                                )
+                            }
+                            Err(status::ProfileError::InvalidName) => (
+                                "400 Bad Request",
+                                "application/json",
+                                "no-store",
+                                ResponseBody::Static(
+                                    "{\n  \"error\": \"invalid_profile_name\"\n}\n",
+                                ),
+                            ),
+                            Err(status::ProfileError::InvalidStep) => (
+                                "400 Bad Request",
+                                "application/json",
+                                "no-store",
+                                ResponseBody::Static(
+                                    "{\n  \"error\": \"invalid_profile_step\"\n}\n",
+                                ),
+                            ),
+                            Err(_) => (
+                                "500 Internal Server Error",
+                                "application/json",
+                                "no-store",
+                                ResponseBody::Static(
+                                    "{\n  \"error\": \"profile_save_failed\"\n}\n",
+                                ),
+                            ),
+                        }
+                    }
+                }
+            }
+            ParsedRequest::DeleteProfile(name) => {
+                match status::profile_find_by_name(&name) {
+                    None => (
+                        "404 Not Found",
+                        "application/json",
+                        "no-store",
+                        ResponseBody::Static("{\n  \"error\": \"profile_not_found\"\n}\n"),
+                    ),
+                    Some((slot, _)) => {
+                        // If this profile is currently active, stop it first.
+                        if let Some(state) = status::active_profile_state() {
+                            if state.name.as_str().eq_ignore_ascii_case(&name) {
+                                status::stop_profile();
+                            }
+                        }
+                        match status::profile_delete(slot) {
+                            Ok(()) => {
+                                println!(
+                                    "http: profile '{}' deleted from slot {} by {:?}",
+                                    name, slot, remote
+                                );
+                                (
+                                    "200 OK",
+                                    "application/json",
+                                    "no-store",
+                                    ResponseBody::Static("{\n  \"ok\": true\n}\n"),
+                                )
+                            }
+                            Err(_) => (
+                                "500 Internal Server Error",
+                                "application/json",
+                                "no-store",
+                                ResponseBody::Static(
+                                    "{\n  \"error\": \"profile_delete_failed\"\n}\n",
+                                ),
+                            ),
+                        }
+                    }
+                }
+            }
+            ParsedRequest::StartProfile(name) => match status::start_profile(&name) {
+                Ok(()) => {
+                    println!("http: profile '{}' started from {:?}", name, remote);
+                    let target_c = status::get_target_temp_c();
+                    let mut body = alloc::string::String::with_capacity(96);
+                    let _ = core::fmt::Write::write_fmt(
+                        &mut body,
+                        format_args!(
+                            "{{\n  \"ok\": true,\n  \"name\": \"{}\",\n  \"step\": 0,\n  \"target_c\": {:.2}\n}}\n",
+                            name, target_c
+                        ),
+                    );
+                    (
+                        "200 OK",
+                        "application/json",
+                        "no-store",
+                        ResponseBody::Owned(body),
+                    )
+                }
+                Err(status::ProfileError::NotFound) => (
+                    "404 Not Found",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Static("{\n  \"error\": \"profile_not_found\"\n}\n"),
+                ),
+                Err(status::ProfileError::InvalidStep) => (
+                    "400 Bad Request",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Static("{\n  \"error\": \"profile_has_no_steps\"\n}\n"),
+                ),
+                Err(_) => (
+                    "500 Internal Server Error",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Static("{\n  \"error\": \"start_profile_failed\"\n}\n"),
+                ),
+            },
+            ParsedRequest::StopProfile => {
+                status::stop_profile();
+                println!("http: profile stopped from {:?}", remote);
+                (
+                    "200 OK",
+                    "application/json",
+                    "no-store",
+                    ResponseBody::Static("{\n  \"ok\": true\n}\n"),
                 )
             }
         };
